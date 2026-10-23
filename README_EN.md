@@ -19,25 +19,25 @@ Voo keeps the full core of upstream [Handy](https://github.com/cjpais/Handy#read
 
 ### Chinese Hot Words
 
-Add Chinese words under **Settings → Advanced → Custom Words** (one per line) and corrections apply immediately — great for names, jargon, and brand terms that ASR tends to get wrong. Words of 3+ hanzi are indexed by default; 2-char words only correct exact homophones.
+Add Chinese words under **Settings → Advanced → Custom Words** (one per line) and corrections apply immediately — great for names, jargon, and brand terms that ASR tends to get wrong. Only words containing 3+ hanzi enter the default pinyin post-correction index, reducing false replacements of short words.
 
 - **Pinyin-phoneme fuzzy matching**: transcripts and hot words are compared as pinyin phoneme sequences, so homophone errors (同音, e.g. 「亮化」→「量化」) and near-homophone errors (flat/retroflex initials, nasal codas) are both corrected. Polyphonic characters (多音字) expand all candidate readings for matching.
-- **Rule replacements**, written alongside hot words:
+- **Rule replacements**, configured separately in **Settings → Advanced → Chinese Hotword Rules**:
 
-  | Syntax | Meaning | Example |
-  | --- | --- | --- |
-  | `word=replacement` | literal replace | `人工智能=AI` |
-  | `regex=>replacement` | regex replace | `(?i)chat ?gpt=>ChatGPT` |
+  | Syntax               | Meaning         | Example                  |
+  | -------------------- | --------------- | ------------------------ |
+  | `word=replacement`   | literal replace | `人工智能=AI`            |
+  | `regex=>replacement` | regex replace   | `(?i)chat ?gpt=>ChatGPT` |
 
-  A bare word with no `=` acts as a plain hot word for fuzzy correction.
+  Enter plain hot words in **Custom Words**, not in the rules field.
 
 ### Recommended Models
 
-| Model | Strength | Best for |
-| --- | --- | --- |
-| **Fun-ASR Nano** | speed/accuracy balance | daily default |
-| **Qwen3-ASR 1.7B** | highest accuracy | best results, capable hardware |
-| **SenseVoice Small** | fastest, lightweight | older machines |
+| Model                | Strength               | Best for                       |
+| -------------------- | ---------------------- | ------------------------------ |
+| **Fun-ASR Nano**     | speed/accuracy balance | daily default                  |
+| **Qwen3-ASR 1.7B**   | highest accuracy       | best results, capable hardware |
+| **SenseVoice Small** | fastest, lightweight   | older machines                 |
 
 ## Install
 
@@ -50,6 +50,18 @@ sudo apt install ./Voo_*.deb
 **Linux notes**: text input needs `xdotool` (X11) or `wtype` / `dotool` (Wayland); if startup complains about `libgtk-layer-shell.so.0`, install `libgtk-layer-shell0` (Debian/Ubuntu) or `gtk-layer-shell` (Fedora/Arch).
 
 For building from source, see [BUILD.md](BUILD.md).
+
+## Evaluate Chinese Input
+
+Compare paired transcripts of the same fixed recordings with the local evaluator:
+
+```bash
+bun run eval:chinese /path/to/paired-results.jsonl
+```
+
+It reports code-point CER, annotated term recall, negative-term insertions and P50/P95 latency.
+See [the evaluation guide](docs/chinese-evaluation.md) for the JSONL schema and metric limits.
+Synthetic tool tests are not evidence of ASR or denoising quality gains.
 
 ## Roadmap
 

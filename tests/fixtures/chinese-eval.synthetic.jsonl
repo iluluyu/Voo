@@ -1,0 +1,2 @@
+{"id":"synthetic-positive","reference":"模型量化","baseline":"模型亮化","candidate":"模型量化","terms":["模型量化"],"baseline_latency_ms":100,"candidate_latency_ms":110}
+{"id":"synthetic-negative","reference":"我想学习","baseline":"我想学习","candidate":"我想雪习","forbidden_terms":["雪习"],"baseline_latency_ms":120,"candidate_latency_ms":130}
