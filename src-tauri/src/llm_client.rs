@@ -136,9 +136,10 @@ struct ChatMessageResponse {
     content: Option<String>,
 }
 
-/// Output budget for Anthropic Messages requests, where `max_tokens` is
-/// required. Ample for a cleaned-up dictation.
-const ANTHROPIC_MAX_TOKENS: u32 = 4096;
+/// Output budget for the request formats that need an explicit token cap
+/// (Anthropic Messages `max_tokens`, OpenAI Responses `max_output_tokens`).
+/// Ample for a cleaned-up dictation.
+const POST_PROCESS_MAX_TOKENS: u32 = 4096;
 
 #[derive(Debug, Serialize)]
 struct AnthropicMessagesRequest {
@@ -175,6 +176,138 @@ impl AnthropicMessagesResponse {
             })
             .collect();
         (!text.is_empty()).then_some(text)
+    }
+}
+
+/// Pick the reasoning-disable request fields for the OpenAI Responses API.
+/// The Responses API takes reasoning controls in a nested `reasoning` object,
+/// so the chat-completions-only flat `reasoning_effort` field and DeepSeek's
+/// `thinking` special case are never used here; the two formats share the
+/// rejection memo but keep format-scoped keys so a rejection of one shape
+/// says nothing about the other.
+fn reasoning_disable_params_responses(provider: &PostProcessProvider) -> ReasoningParams {
+    // OpenRouter's nested object also accepts exclude:true, which keeps
+    // reasoning text out of the response so it can't pollute output text.
+    let exclude = (provider.id == "openrouter").then_some(true);
+    ReasoningParams {
+        reasoning: Some(ReasoningConfig {
+            effort: Some("none".to_string()),
+            exclude,
+        }),
+        ..Default::default()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesInputContent {
+    #[serde(rename = "type")]
+    content_type: &'static str,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesInputItem {
+    role: &'static str,
+    content: Vec<ResponsesInputContent>,
+}
+
+/// `text.format` structured-output block of the Responses API: the same
+/// schema payload as chat-completions `response_format` in a different
+/// envelope.
+#[derive(Debug, Serialize)]
+struct ResponsesTextFormat {
+    #[serde(rename = "type")]
+    format_type: String,
+    name: String,
+    strict: bool,
+    schema: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesText {
+    format: ResponsesTextFormat,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesApiRequest {
+    model: String,
+    input: Vec<ResponsesInputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    max_output_tokens: u32,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<ResponsesText>,
+    #[serde(flatten)]
+    reasoning: ReasoningParams,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesApiResponse {
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
+    status: Option<String>,
+    incomplete_details: Option<ResponsesIncompleteDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesIncompleteDetails {
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ResponsesOutputItem {
+    Message {
+        #[serde(default)]
+        content: Vec<ResponsesContentBlock>,
+    },
+    /// Reasoning summaries, tool calls, and any other non-message items
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ResponsesContentBlock {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    /// Refusals and any other non-text blocks
+    #[serde(other)]
+    Other,
+}
+
+impl ResponsesApiResponse {
+    /// Concatenate the `output_text` of every message item, ignoring reasoning
+    /// summaries and other non-message output. Returns `None` when nothing
+    /// usable was produced.
+    fn into_text(self) -> Option<String> {
+        let text: String = self
+            .output
+            .into_iter()
+            .filter_map(|item| match item {
+                ResponsesOutputItem::Message { content } => Some(content),
+                ResponsesOutputItem::Other => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                ResponsesContentBlock::OutputText { text } => Some(text),
+                ResponsesContentBlock::Other => None,
+            })
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+/// Build the OpenAI Responses endpoint URL: append `/responses` to a base
+/// that already carries the `/v1` prefix and `/v1/responses` otherwise, so
+/// common bases (`.../v1`) never end up with a doubled prefix.
+fn responses_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/responses")
+    } else {
+        format!("{base}/v1/responses")
     }
 }
 
@@ -351,6 +484,19 @@ pub async fn send_chat_completion(
         return send_anthropic_message(provider, api_key, model, prompt).await;
     }
 
+    if provider.api_format == PostProcessApiFormat::OpenAiResponses {
+        return send_openai_responses(
+            provider,
+            api_key,
+            model,
+            prompt,
+            None,
+            None,
+            disable_reasoning,
+        )
+        .await;
+    }
+
     send_chat_completion_with_schema(
         provider,
         api_key,
@@ -382,6 +528,21 @@ pub async fn send_chat_completion_with_schema(
     json_schema: Option<Value>,
     disable_reasoning: bool,
 ) -> Result<Option<String>, String> {
+    if provider.api_format == PostProcessApiFormat::OpenAiResponses {
+        // Structured output is spoken through the Responses API's
+        // `text.format` envelope instead of `response_format`.
+        return send_openai_responses(
+            provider,
+            api_key,
+            model,
+            user_content,
+            system_prompt,
+            json_schema,
+            disable_reasoning,
+        )
+        .await;
+    }
+
     let base_url = provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base_url);
 
@@ -536,7 +697,7 @@ async fn send_anthropic_message(
 
     let request_body = AnthropicMessagesRequest {
         model: model.to_string(),
-        max_tokens: ANTHROPIC_MAX_TOKENS,
+        max_tokens: POST_PROCESS_MAX_TOKENS,
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: prompt,
@@ -578,11 +739,157 @@ async fn send_anthropic_message(
     if message.stop_reason.as_deref() == Some("max_tokens") {
         return Err(format!(
             "Response was truncated at the {} token limit",
-            ANTHROPIC_MAX_TOKENS
+            POST_PROCESS_MAX_TOKENS
         ));
     }
 
     Ok(message.into_text())
+}
+
+/// Send a single request to an OpenAI Responses API (`/responses`). Used by
+/// every provider set to the Responses format. The system prompt (when there
+/// is one) travels as `instructions`, the dictation as a user `input`
+/// message, and structured output (when requested) uses the `text.format`
+/// envelope. Same error conventions as the chat-completions path: sanitized
+/// URLs, no transcription echoed into errors, and a rejection-retry for the
+/// reasoning-disable fields.
+async fn send_openai_responses(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    disable_reasoning: bool,
+) -> Result<Option<String>, String> {
+    let url = responses_url(&provider.base_url);
+
+    debug!(
+        "Sending OpenAI Responses request to: {}",
+        sanitized_url_for_log(&url)
+    );
+
+    let client = create_client(provider, &api_key)?;
+
+    // The rejection memo is shared with the chat-completions path but scoped
+    // per format: a chat endpoint rejecting `reasoning_effort` says nothing
+    // about whether the Responses API accepts `reasoning`, and vice versa.
+    let key = format!("responses|{}", endpoint_key(provider, model));
+    let mut request_body = ResponsesApiRequest {
+        model: model.to_string(),
+        input: vec![ResponsesInputItem {
+            role: "user",
+            content: vec![ResponsesInputContent {
+                content_type: "input_text",
+                text: user_content,
+            }],
+        }],
+        instructions: system_prompt,
+        max_output_tokens: POST_PROCESS_MAX_TOKENS,
+        stream: false,
+        text: json_schema.map(|schema| ResponsesText {
+            format: ResponsesTextFormat {
+                format_type: "json_schema".to_string(),
+                name: "transcription_output".to_string(),
+                strict: true,
+                schema,
+            },
+        }),
+        reasoning: if disable_reasoning && !is_known_rejected(&key) {
+            reasoning_disable_params_responses(provider)
+        } else {
+            ReasoningParams::default()
+        },
+    };
+
+    let mut response = client
+        .post(&url)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| report_reqwest_error("HTTP request failed", &e))?;
+    let mut status = response.status();
+    debug!(
+        "OpenAI Responses response received with status {} over {:?} from {}",
+        status,
+        response.version(),
+        sanitized_url(response.url())
+    );
+
+    // A 400/422 on a request carrying reasoning-disable fields is almost always
+    // the endpoint rejecting those fields — retry once without them.
+    if !status.is_success()
+        && matches!(status.as_u16(), 400 | 422)
+        && !request_body.reasoning.is_empty()
+    {
+        let error_text = response.text().await.unwrap_or_else(|e| {
+            report_reqwest_error("Failed to read reasoning rejection response", &e)
+        });
+        info!(
+            "Endpoint rejected Responses request with reasoning disabled (status {}): {}. Retrying without reasoning fields",
+            status, error_text
+        );
+
+        request_body.reasoning = ReasoningParams::default();
+        response = client
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| report_reqwest_error("HTTP retry failed", &e))?;
+        status = response.status();
+        debug!(
+            "OpenAI Responses retry response received with status {} over {:?} from {}",
+            status,
+            response.version(),
+            sanitized_url(response.url())
+        );
+
+        if status.is_success() {
+            info!(
+                "Retry without reasoning fields succeeded; '{}' (model '{}') will skip them from now on",
+                sanitized_url_for_log(&provider.base_url), model
+            );
+            remember_rejection(key);
+        }
+    }
+
+    if !status.is_success() {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|e| report_reqwest_error("Failed to read API error response", &e));
+        return Err(format!(
+            "API request failed with status {}: {}",
+            status, error_text
+        ));
+    }
+
+    let message: ResponsesApiResponse = response
+        .json()
+        .await
+        .map_err(|e| report_reqwest_error("Failed to parse API response", &e))?;
+
+    // A response cut off at the provider's output limit is incomplete; pasting
+    // it would silently drop the end of the dictation (or, for structured
+    // output, paste unparseable JSON).
+    if message.status.as_deref() == Some("incomplete")
+        || message
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_deref())
+            == Some("max_output_tokens")
+    {
+        return Err("Response was truncated at the provider's output token limit".to_string());
+    }
+
+    // An empty `output` (or one without any message text) produced nothing
+    // usable; report it instead of pretending an empty paste succeeded.
+    let Some(text) = message.into_text() else {
+        return Err("API response contained no output text".to_string());
+    };
+
+    Ok(Some(text))
 }
 
 /// Fetch available models from an OpenAI-compatible API
@@ -696,6 +1003,43 @@ mod tests {
         }
     }
 
+    fn responses_format_provider(base_url: &str) -> PostProcessProvider {
+        PostProcessProvider {
+            api_format: PostProcessApiFormat::OpenAiResponses,
+            ..provider("custom", base_url)
+        }
+    }
+
+    fn responses_request_json(
+        instructions: Option<&str>,
+        json_schema: Option<Value>,
+        reasoning: ReasoningParams,
+    ) -> Value {
+        let request = ResponsesApiRequest {
+            model: "test-model".to_string(),
+            input: vec![ResponsesInputItem {
+                role: "user",
+                content: vec![ResponsesInputContent {
+                    content_type: "input_text",
+                    text: "hi".to_string(),
+                }],
+            }],
+            instructions: instructions.map(str::to_string),
+            max_output_tokens: POST_PROCESS_MAX_TOKENS,
+            stream: false,
+            text: json_schema.map(|schema| ResponsesText {
+                format: ResponsesTextFormat {
+                    format_type: "json_schema".to_string(),
+                    name: "transcription_output".to_string(),
+                    strict: true,
+                    schema,
+                },
+            }),
+            reasoning,
+        };
+        serde_json::to_value(&request).unwrap()
+    }
+
     fn request_json(reasoning: ReasoningParams) -> Value {
         let request = ChatCompletionRequest {
             model: "test-model".to_string(),
@@ -726,6 +1070,55 @@ mod tests {
         });
 
         format!("http://{address}")
+    }
+
+    /// Like `serve_one_response`, but also hands back the raw request (line +
+    /// body) so tests can assert on the URL path and the JSON payload.
+    async fn serve_one_response_capturing(
+        status: &str,
+        body: &str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            // Read until the headers and their Content-Length body arrived;
+            // reqwest may deliver them in several TCP segments.
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                raw.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&raw);
+                if let Some(header_end) = text.find("\r\n\r\n") {
+                    let length = text[..header_end]
+                        .lines()
+                        .find_map(|line| {
+                            let lower = line.to_lowercase();
+                            lower
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if text.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&raw).to_string());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{address}"), rx)
     }
 
     #[test]
@@ -885,14 +1278,14 @@ mod tests {
     fn anthropic_request_carries_required_max_tokens() {
         let request = AnthropicMessagesRequest {
             model: "claude-haiku".to_string(),
-            max_tokens: ANTHROPIC_MAX_TOKENS,
+            max_tokens: POST_PROCESS_MAX_TOKENS,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
             }],
         };
         let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["max_tokens"], ANTHROPIC_MAX_TOKENS);
+        assert_eq!(json["max_tokens"], POST_PROCESS_MAX_TOKENS);
         assert_eq!(json["messages"][0]["role"], "user");
         assert!(json.get("stream").is_none());
         assert!(json.get("reasoning_effort").is_none());
@@ -962,5 +1355,188 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().contains("truncated"));
+    }
+
+    #[test]
+    fn responses_url_appends_responses_without_duplicating_v1() {
+        assert_eq!(
+            responses_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/responses"
+        );
+        assert_eq!(
+            responses_url("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1/responses"
+        );
+        assert_eq!(
+            responses_url("https://example.com"),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn responses_request_omits_chat_completion_fields() {
+        let json = responses_request_json(Some("clean this up"), None, ReasoningParams::default());
+        assert_eq!(json["model"], "test-model");
+        assert_eq!(json["instructions"], "clean this up");
+        assert_eq!(json["max_output_tokens"], POST_PROCESS_MAX_TOKENS);
+        assert_eq!(json["input"][0]["role"], "user");
+        assert_eq!(json["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(json["input"][0]["content"][0]["text"], "hi");
+        assert_eq!(json["stream"], false);
+        // Chat-completions-only fields must not leak into the Responses body.
+        assert!(json.get("messages").is_none());
+        assert!(json.get("choices").is_none());
+        assert!(json.get("response_format").is_none());
+        assert!(json.get("max_tokens").is_none());
+        assert!(json.get("reasoning_effort").is_none());
+        assert!(json.get("thinking").is_none());
+
+        // Without a system prompt the field is omitted entirely.
+        let json = responses_request_json(None, None, ReasoningParams::default());
+        assert!(json.get("instructions").is_none());
+    }
+
+    #[test]
+    fn responses_reasoning_uses_nested_object_without_deepseek_special_case() {
+        // DeepSeek's chat-completions `thinking` special case must not leak
+        // into the Responses format.
+        let params =
+            reasoning_disable_params_responses(&provider("custom", "https://api.deepseek.com"));
+        assert!(params.reasoning_effort.is_none());
+        assert!(params.thinking.is_none());
+        let reasoning = params.reasoning.as_ref().unwrap();
+        assert_eq!(reasoning.effort.as_deref(), Some("none"));
+        assert!(reasoning.exclude.is_none());
+
+        // OpenRouter keeps its nested object and still excludes reasoning
+        // text from the response.
+        let params = reasoning_disable_params_responses(&provider(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+        ));
+        let json = responses_request_json(None, None, params);
+        assert_eq!(json["reasoning"]["effort"], "none");
+        assert_eq!(json["reasoning"]["exclude"], true);
+        assert!(json.get("reasoning_effort").is_none());
+        assert!(json.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_response_joins_message_output_text() {
+        let response: ResponsesApiResponse = serde_json::from_str(
+            r#"{"status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","content":[{"type":"output_text","text":"Hello"},{"type":"refusal","refusal":"no"}]},{"type":"message","content":[{"type":"output_text","text":" world"}]}]}"#,
+        )
+        .unwrap();
+        // Non-message items are ignored, output_text blocks are concatenated.
+        assert_eq!(response.into_text().as_deref(), Some("Hello world"));
+
+        // Output without any message text produces nothing usable.
+        let no_text: ResponsesApiResponse = serde_json::from_str(
+            r#"{"status":"completed","output":[{"type":"reasoning","summary":[]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(no_text.into_text(), None);
+    }
+
+    #[tokio::test]
+    async fn responses_format_parses_message_output() {
+        let (base_url, request_rx) = serve_one_response_capturing(
+            "200 OK",
+            r#"{"object":"response","status":"completed","output":[{"type":"reasoning","summary":[]},{"type":"message","content":[{"type":"output_text","text":"Hello"}]},{"type":"message","content":[{"type":"output_text","text":" world"}]}]}"#,
+        )
+        .await;
+        let result = send_chat_completion(
+            &responses_format_provider(&base_url),
+            "key".to_string(),
+            "test-model",
+            "raw text".to_string(),
+            false,
+        )
+        .await;
+        assert_eq!(result, Ok(Some("Hello world".to_string())));
+
+        let request = request_rx.await.unwrap();
+        // A bare host gets /v1 inserted exactly once.
+        assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+        assert!(request.contains("\"input_text\""));
+        assert!(request.contains("\"max_output_tokens\""));
+        // Legacy mode sends no system prompt, so no instructions field.
+        assert!(!request.contains("instructions"));
+    }
+
+    #[tokio::test]
+    async fn responses_format_rejects_truncated_response() {
+        for body in [
+            r#"{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"Cut off"}]}]}"#,
+            r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}"#,
+        ] {
+            let base_url = serve_one_response("200 OK", body).await;
+            let result = send_chat_completion(
+                &responses_format_provider(&base_url),
+                "key".to_string(),
+                "test-model",
+                "raw text".to_string(),
+                false,
+            )
+            .await;
+            assert!(result.unwrap_err().contains("truncated"));
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_format_rejects_empty_output() {
+        for body in [
+            r#"{"status":"completed","output":[]}"#,
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"no"}]}]}"#,
+        ] {
+            let base_url = serve_one_response("200 OK", body).await;
+            let result = send_chat_completion(
+                &responses_format_provider(&base_url),
+                "key".to_string(),
+                "test-model",
+                "raw text".to_string(),
+                false,
+            )
+            .await;
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("no output text"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_structured_request_uses_text_format_envelope() {
+        let (base_url, request_rx) = serve_one_response_capturing(
+            "200 OK",
+            r#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"transcription\": \"ok\"}"}]}]}"#,
+        )
+        .await;
+        let result = send_chat_completion_with_schema(
+            &responses_format_provider(&base_url),
+            "key".to_string(),
+            "test-model",
+            "raw text".to_string(),
+            Some("system prompt".to_string()),
+            Some(serde_json::json!({"type": "object"})),
+            true,
+        )
+        .await;
+        assert_eq!(result, Ok(Some("{\"transcription\": \"ok\"}".to_string())));
+
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+        // The system prompt rides in instructions, the schema in text.format.
+        assert!(request.contains("\"instructions\":\"system prompt\""));
+        assert!(request.contains("\"text\":{\"format\":"));
+        assert!(request.contains("\"type\":\"json_schema\""));
+        // Structured output rides in the Responses envelope: instructions +
+        // text.format, nested reasoning object, and no chat-completions fields.
+        assert!(request.contains("\"reasoning\":{\"effort\":\"none\"}"));
+        assert!(!request.contains("\"messages\""));
+        assert!(!request.contains("\"response_format\""));
+        assert!(!request.contains("\"reasoning_effort\""));
+        assert!(!request.contains("\"thinking\""));
     }
 }

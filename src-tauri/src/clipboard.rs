@@ -1,4 +1,5 @@
 use crate::input::{self, EnigoState};
+use crate::managers::transcription::commit;
 #[cfg(target_os = "linux")]
 use crate::settings::TypingTool;
 use crate::settings::{get_settings, AutoSubmitKey, ClipboardHandling, PasteMethod};
@@ -796,6 +797,48 @@ pub(crate) fn send_return_key(enigo: &mut Enigo, key_type: AutoSubmitKey) -> Res
     Ok(())
 }
 
+/// Paste one incrementally-committed segment of a live stream through the
+/// same channel as [`paste`] (same method, delays, and lock — no new input
+/// injection), but without the whole-utterance behaviors that belong to the
+/// final paste only: no trailing space, no auto-submit Return, no clipboard
+/// copy/restore bookkeeping beyond what the method itself does.
+///
+/// Runs on the stream-commit paste thread, never the audio callback.
+pub fn paste_delta(text: &str, app_handle: &AppHandle) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let _paste = PASTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let settings = get_settings(app_handle);
+    let paste_method = settings.paste_method;
+    match paste_method {
+        PasteMethod::None => Ok(()),
+        PasteMethod::Direct => paste_direct(
+            text,
+            app_handle,
+            #[cfg(target_os = "linux")]
+            settings.typing_tool,
+        ),
+        PasteMethod::CtrlV | PasteMethod::CtrlShiftV | PasteMethod::ShiftInsert => {
+            paste_via_clipboard(
+                text,
+                app_handle,
+                &paste_method,
+                settings.paste_delay_ms,
+                settings.paste_delay_after_ms,
+            )
+        }
+        PasteMethod::ExternalScript => {
+            let script_path = settings
+                .external_script_path
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .ok_or("External script path is not configured")?;
+            paste_via_external_script(text, script_path)
+        }
+    }
+}
+
 fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool {
     auto_submit && paste_method != PasteMethod::None
 }
@@ -805,6 +848,9 @@ fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool
 /// injection hops to the main thread (see `with_enigo`).
 pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
     let _paste = PASTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    // A stream that committed text incrementally already put its prefix into
+    // the target app: subtract it so only the final remainder is output.
+    let text = commit::adjust_final_paste(&text);
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;

@@ -8,7 +8,9 @@ use crate::managers::model::ModelManager;
 use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, OverlayStyle, PostProcessMode, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -47,6 +49,8 @@ impl Drop for FinishGuard {
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
         }
+        // 会话收尾：清掉可能未被消费的聚焦上下文快照（只在内存，绝不落盘）。
+        crate::managers::llm_context::clear();
         // The pipeline just freed its large transient buffers (captured PCM,
         // WAV copy, engine scratch); hand the cached pages back to the OS so
         // they don't sit in malloc arenas until they get swapped out (#1792).
@@ -125,6 +129,89 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
+/// True when every post-processing ingredient is configured and usable: an
+/// active provider, a model id, a selected non-empty prompt, and an API key
+/// (Apple Intelligence is on-device and needs no key). This is the "ready"
+/// half of the seamless-dictation decision — a missing key or prompt can
+/// never produce a doomed LLM call.
+fn post_process_config_ready(settings: &AppSettings) -> bool {
+    let Some(provider) = settings.active_post_process_provider() else {
+        return false;
+    };
+    let model = settings
+        .post_process_models
+        .get(&provider.id)
+        .map(String::as_str)
+        .unwrap_or_default();
+    if model.trim().is_empty() {
+        return false;
+    }
+    let prompt_ready = match settings.post_process_selected_prompt_id.as_deref() {
+        Some(prompt_id) => settings
+            .post_process_prompts
+            .iter()
+            .any(|prompt| prompt.id == prompt_id && !prompt.prompt.trim().is_empty()),
+        None => false,
+    };
+    if !prompt_ready {
+        return false;
+    }
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        return true;
+    }
+    settings
+        .post_process_api_keys
+        .get(&provider.id)
+        .map(|key| !key.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Whether this recording's output should go through LLM post-processing.
+/// `requested` is the entry point's own flag — the dedicated
+/// `transcribe_with_post_process` action passes `true`, ordinary dictation
+/// `false`. Both are gated on `post_process_enabled` AND a fully usable
+/// configuration (a missing key or prompt can never produce a doomed LLM
+/// call). Past that gate the mode decides: `Always` post-processes every
+/// transcription (seamless dictation); `SeparateBinding` post-processes
+/// only the dedicated action, and ordinary dictation stays untouched.
+fn effective_post_process(requested: bool, settings: &AppSettings) -> bool {
+    if !settings.post_process_enabled || !post_process_config_ready(settings) {
+        return false;
+    }
+    match settings.post_process_mode {
+        PostProcessMode::Always => true,
+        PostProcessMode::SeparateBinding => requested,
+    }
+}
+
+/// Legacy-mode outcome mapping. Every failure shape collapses to `None`,
+/// which callers treat as "keep the original transcription":
+/// post-processing must never lose the transcribed text. Failures are
+/// debug-only — the user already has the raw text and must not see an error.
+fn legacy_llm_response_to_output(response: Result<Option<String>, String>) -> Option<String> {
+    match response {
+        Ok(Some(content)) => {
+            let content = strip_invisible_chars(strip_think_block(&content));
+            if content.trim().is_empty() {
+                debug!("LLM post-processing returned empty output; keeping local transcription");
+                return None;
+            }
+            Some(content)
+        }
+        Ok(None) => {
+            debug!("LLM API response has no content");
+            None
+        }
+        Err(e) => {
+            debug!(
+                "LLM post-processing failed: {}. Falling back to original transcription.",
+                e
+            );
+            None
+        }
+    }
+}
+
 async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
@@ -181,16 +268,49 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         return None;
     }
 
-    debug!(
-        "Starting LLM post-processing with provider '{}' (model: {})",
-        provider.id, model
-    );
-
     let api_key = settings
         .post_process_api_keys
         .get(&provider.id)
         .cloned()
         .unwrap_or_default();
+
+    // 未配置 key 等同关闭：不下发注定失败的请求（Apple Intelligence 是
+    // 本地模型，无 key 可言，已在 ready 判定中放行）。静默跳过，不报错。
+    if provider.id != APPLE_INTELLIGENCE_PROVIDER_ID && api_key.trim().is_empty() {
+        debug!(
+            "Post-processing skipped because provider '{}' has no API key configured",
+            provider.id
+        );
+        return None;
+    }
+
+    // 词表注入（单独标注的数据字段，不进指令正文）：只在后处理链路全部
+    // 就绪后计算；空词表或没有候选匹配草稿时返回 None，请求内容与现状
+    // 逐字节一致。未启用后处理/未配置 API 的路径在更早处已返回。
+    let vocabulary = crate::managers::llm_prompt::vocabulary_block(
+        &settings.custom_words,
+        transcription,
+        settings.hotword_pinyin_threshold,
+        settings.hotword_dialect_confusion,
+    );
+
+    // 聚焦上下文（录音开始前的快照）：取走即消费（单次使用）；拿不到
+    // 任何一项 → None，请求与无上下文时逐字节一致。历史重跑路径没有
+    // 快照，同样静默无上下文。App 标识与游标前文本都是不可信数据字
+    // 段，不进指令正文。
+    let context = crate::managers::llm_context::take()
+        .as_ref()
+        .and_then(|snapshot| {
+            crate::managers::llm_context::context_block(
+                snapshot.app(),
+                snapshot.text_before_cursor(),
+            )
+        });
+
+    debug!(
+        "Starting LLM post-processing with provider '{}' (model: {})",
+        provider.id, model
+    );
 
     // Ask these providers to skip reasoning/thinking — post-processing rarely
     // benefits from it and it adds seconds of latency. llm_client picks the
@@ -201,7 +321,15 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         debug!("Using structured outputs for provider '{}'", provider.id);
 
         let system_prompt = build_system_prompt(&prompt);
-        let user_content = transcription.to_string();
+        // 词表与上下文都是单独标注的数据字段，依次附加在草稿之后；
+        // 任一为 None 时该字段逐字节不出现。
+        let user_content = crate::managers::llm_prompt::with_vocabulary_block(
+            crate::managers::llm_prompt::with_vocabulary_block(
+                transcription.to_string(),
+                vocabulary.as_deref(),
+            ),
+            context.as_deref(),
+        );
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
         if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
@@ -234,7 +362,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                         }
                     }
                     Err(err) => {
-                        error!("Apple Intelligence post-processing failed: {}", err);
+                        debug!("Apple Intelligence post-processing failed: {}", err);
                         None
                     }
                 };
@@ -272,7 +400,8 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         .await
         {
             Ok(Some(content)) => {
-                // Parse the JSON response to extract the transcription field
+                // Parse the JSON response to extract the transcription field.
+                // 输出非法（缺字段/解析失败）或空结果一律保留本地草稿原样。
                 let content = strip_think_block(&content);
                 match serde_json::from_str::<serde_json::Value>(content) {
                     Ok(json) => {
@@ -280,6 +409,13 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                             json.get(TRANSCRIPTION_FIELD).and_then(|t| t.as_str())
                         {
                             let result = strip_invisible_chars(transcription_value);
+                            if result.trim().is_empty() {
+                                debug!(
+                                    "Structured output for provider '{}' is empty; keeping local transcription",
+                                    provider.id
+                                );
+                                return None;
+                            }
                             debug!(
                                 "Structured output post-processing succeeded for provider '{}'. Output length: {} chars",
                                 provider.id,
@@ -287,25 +423,28 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                             );
                             return Some(result);
                         } else {
-                            error!("Structured output response missing 'transcription' field");
-                            return Some(strip_invisible_chars(content));
+                            debug!(
+                                "Structured output response from provider '{}' missing 'transcription' field; keeping local transcription",
+                                provider.id
+                            );
+                            return None;
                         }
                     }
                     Err(e) => {
-                        error!(
-                            "Failed to parse structured output JSON: {}. Returning raw content.",
-                            e
+                        debug!(
+                            "Failed to parse structured output JSON from provider '{}': {}; keeping local transcription",
+                            provider.id, e
                         );
-                        return Some(strip_invisible_chars(content));
+                        return None;
                     }
                 }
             }
             Ok(None) => {
-                error!("LLM API response has no content");
+                debug!("LLM API response has no content");
                 return None;
             }
             Err(e) => {
-                warn!(
+                debug!(
                     "Structured output failed for provider '{}': {}. Falling back to legacy mode.",
                     provider.id, e
                 );
@@ -315,40 +454,34 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 
     // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    let processed_prompt = crate::managers::llm_prompt::with_vocabulary_block(
+        crate::managers::llm_prompt::with_vocabulary_block(
+            prompt.replace("${output}", transcription),
+            vocabulary.as_deref(),
+        ),
+        context.as_deref(),
+    );
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
-    match crate::llm_client::send_chat_completion(
+    let response = crate::llm_client::send_chat_completion(
         &provider,
         api_key,
         &model,
         processed_prompt,
         disable_reasoning,
     )
-    .await
-    {
-        Ok(Some(content)) => {
-            let content = strip_invisible_chars(strip_think_block(&content));
-            debug!(
-                "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
-                provider.id,
-                content.len()
-            );
-            Some(content)
-        }
-        Ok(None) => {
-            error!("LLM API response has no content");
-            None
-        }
-        Err(e) => {
-            error!(
-                "LLM post-processing failed for provider '{}': {}. Falling back to original transcription.",
-                provider.id,
-                e
-            );
-            None
-        }
+    .await;
+
+    // 任一失败形状都折叠为 None = 保留本地原始转写；静默降级，只记 debug。
+    if let Some(content) = legacy_llm_response_to_output(response) {
+        debug!(
+            "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
+            provider.id,
+            content.len()
+        );
+        return Some(content);
     }
+    None
 }
 
 pub(crate) struct ProcessedTranscription {
@@ -433,6 +566,12 @@ impl ShortcutAction for TranscribeAction {
         // Get the microphone mode to determine audio feedback timing
         let plan_started = Instant::now();
         let settings = get_settings(app);
+        // 无感后处理：普通听写路径在开关开启且配置齐全时同样进入后处理，
+        // 聚焦上下文快照的采集条件随之对齐（capture 内部仍会再查两个开关）。
+        crate::managers::llm_context::capture_at_start(
+            effective_post_process(self.post_process, &settings),
+            &settings,
+        );
         let is_always_on = settings.always_on_microphone;
 
         let selected_model_info = app
@@ -591,7 +730,8 @@ impl ShortcutAction for TranscribeAction {
         // the larger panel, but it still switches from listening to a working
         // spinner while the stream finalizes. Non-streaming paths use the
         // compact transcribing pill (None no-ops in show_*).
-        let style = get_settings(app).overlay_style;
+        let stop_settings = get_settings(app);
+        let style = stop_settings.overlay_style;
         // Capture this before finalizing the stream so every later working state
         // targets the same overlay that was shown for this transcription.
         let use_streaming_overlay = should_use_streaming_overlay(style, tm.is_streaming());
@@ -608,7 +748,10 @@ impl ShortcutAction for TranscribeAction {
         play_feedback_sound(app, SoundType::Stop);
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
-        let post_process = self.post_process;
+                                                 // 分流点：入口动作自带的后处理标志 OR（开关开启且配置齐全的）无感
+                                                 // 后处理。开关关闭或配置不全时退化为入口自身标志，普通听写路径
+                                                 // 行为与无感改造前一致。
+        let post_process = effective_post_process(self.post_process, &stop_settings);
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -735,6 +878,10 @@ impl ShortcutAction for TranscribeAction {
                                 ) {
                                     error!("Failed to save history entry: {}", err);
                                 }
+                                // Lexicon curation trigger check, now that the
+                                // entry is saved: spawns a background task and
+                                // returns immediately — never blocks pasting.
+                                crate::managers::lexicon_curation::maybe_start_curation(&ah);
                             }
 
                             if processed.final_text.is_empty() {
@@ -764,10 +911,12 @@ impl ShortcutAction for TranscribeAction {
                                         }
 
                                         match utils::paste(final_text, ah_clone.clone()) {
-                                            Ok(()) => debug!(
-                                                "Text pasted successfully in {:?}",
-                                                paste_time.elapsed()
-                                            ),
+                                            Ok(()) => {
+                                                debug!(
+                                                    "Text pasted successfully in {:?}",
+                                                    paste_time.elapsed()
+                                                );
+                                            }
                                             Err(e) => {
                                                 error!("Failed to paste transcription: {}", e);
                                                 let _ = ah_clone.emit("paste-error", ());
@@ -898,15 +1047,104 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
-        strip_think_block,
+        complete_unless_cancelled, effective_post_process, is_blank_transcription,
+        legacy_llm_response_to_output, should_use_streaming_overlay, strip_think_block,
     };
-    use crate::settings::OverlayStyle;
+    use crate::settings::{get_default_settings, AppSettings, OverlayStyle, PostProcessMode};
     use std::future;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    fn seamless_test_settings() -> AppSettings {
+        let mut settings = get_default_settings();
+        settings.post_process_enabled = true;
+        settings
+            .post_process_api_keys
+            .insert("deepseek".to_string(), "sk-test".to_string());
+        settings.post_process_selected_prompt_id =
+            Some("default_improve_transcriptions".to_string());
+        settings
+    }
+
+    /// 开关为真、配置齐全、模式 `always`（默认）→ 普通听写路径
+    /// （requested=false）也走后处理，专用动作同样。
+    #[test]
+    fn always_mode_runs_on_ordinary_dictation() {
+        let settings = seamless_test_settings();
+        assert_eq!(settings.post_process_mode, PostProcessMode::Always);
+        assert!(effective_post_process(false, &settings));
+        assert!(effective_post_process(true, &settings));
+    }
+
+    /// 模式 `separate` → 只有专用动作（requested=true）走后处理，
+    /// 普通听写跳过。
+    #[test]
+    fn separate_mode_restricts_post_process_to_dedicated_action() {
+        let mut settings = seamless_test_settings();
+        settings.post_process_mode = PostProcessMode::SeparateBinding;
+        assert!(!effective_post_process(false, &settings));
+        assert!(effective_post_process(true, &settings));
+    }
+
+    /// 开关为假 → 无论模式与入口，一律不调用。
+    #[test]
+    fn post_process_disabled_disables_both_paths() {
+        for mode in [PostProcessMode::Always, PostProcessMode::SeparateBinding] {
+            let mut settings = seamless_test_settings();
+            settings.post_process_enabled = false;
+            settings.post_process_mode = mode;
+            assert!(!effective_post_process(false, &settings));
+            assert!(!effective_post_process(true, &settings));
+        }
+    }
+
+    /// 配置缺失（无 key / 未选 prompt / 无模型）→ 等同关闭，不调用。
+    #[test]
+    fn incomplete_config_is_treated_as_disabled() {
+        // 全新默认（开关已默认开，但没有 key，也没选 prompt）：不调用。
+        let mut no_key = get_default_settings();
+        no_key.post_process_selected_prompt_id = Some("default_improve_transcriptions".to_string());
+        assert!(no_key.post_process_enabled);
+        assert!(!effective_post_process(false, &no_key));
+        assert!(!effective_post_process(true, &no_key));
+
+        // 有 key 但未选 prompt：不调用。
+        let mut no_prompt = seamless_test_settings();
+        no_prompt.post_process_selected_prompt_id = None;
+        assert!(!effective_post_process(false, &no_prompt));
+        assert!(!effective_post_process(true, &no_prompt));
+
+        // 有 key 但模型为空：不调用（含专用动作）。
+        let mut no_model = seamless_test_settings();
+        no_model
+            .post_process_models
+            .insert("deepseek".to_string(), String::new());
+        assert!(!effective_post_process(false, &no_model));
+        assert!(!effective_post_process(true, &no_model));
+    }
+
+    /// LLM 返回错误/空内容/纯空白 → 一律折叠为 None；None 在
+    /// process_transcription_output 中意味着保留原始转写（不丢字）。
+    #[test]
+    fn llm_error_falls_back_to_original_transcription() {
+        assert_eq!(
+            legacy_llm_response_to_output(Err("HTTP 500 Internal Server Error".to_string())),
+            None
+        );
+        assert_eq!(legacy_llm_response_to_output(Ok(None)), None);
+        assert_eq!(
+            legacy_llm_response_to_output(Ok(Some("  \n".to_string()))),
+            None
+        );
+        assert_eq!(
+            legacy_llm_response_to_output(Ok(Some(
+                "<think>reasoning…</think>\n清理后的文本".to_string()
+            ))),
+            Some("清理后的文本".to_string())
+        );
+    }
 
     #[test]
     fn blank_transcription_is_detected() {
