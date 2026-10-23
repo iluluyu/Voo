@@ -55,7 +55,7 @@ For building from source, see [BUILD.md](BUILD.md).
 
 Long-term goal: evolve dictation into an input method that knows your vocabulary.
 
-1. **Sogou-style dictionaries** — categorized lexicons (IT, medicine, law…) with import and subscription updates
+1. **Categorized dictionaries** — IT, medicine, law and other lexicons with one-click import and subscription updates
 2. **Automatic hot-word correction and cloud hot-word updates**
 3. **Learn from your edits** — post-transcription corrections sink into personal hot words
 4. **MCP server** — expose hot-word/dictionary management so your own AI can do adaptive correction
