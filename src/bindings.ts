@@ -296,6 +296,17 @@ async changePostProcessApiKeySetting(providerId: string, apiKey: string) : Promi
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 后处理思考深度（none/low/medium/high；未知值静默回落到 none）。
+ */
+async changePostProcessThinkingSetting(level: ThinkingLevel) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_post_process_thinking_setting", { level }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changePostProcessModelSetting(providerId: string, model: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_post_process_model_setting", { providerId, model }) };
@@ -1612,6 +1623,7 @@ export type PostProcessProvider = { id: string; label: string; base_url: string;
  * `separate` 仅专用快捷键动作走后处理。
  */
 export type PostProcessMode = "always" | "separate"
+export type ThinkingLevel = "none" | "low" | "medium" | "high"
 /**
  * 内置种子 + 当前生效规则概览（只读；供将来接更新）。
  */
