@@ -31,6 +31,7 @@ use tauri_specta::Event;
 use transcribe_cpp::{Backend, Itn, RunOptions, Task, Transcript};
 
 mod chunked;
+pub(crate) mod commit;
 mod live;
 pub mod policy;
 
@@ -887,15 +888,65 @@ impl TranscriptionManager {
     /// Transcribe a whole clip in batch: a re-transcribed history entry, or
     /// a file from the CLI.
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        // Not a recording: any stale incremental-commit remainder from a
+        // cancelled previous session must not adjust this paste.
+        commit::clear_final_paste_prefix();
         self.complete(Instant::now(), audio, None)
     }
 
     /// Transcribe a finished recording: what its live decode produced, or a
     /// batch run of the whole recording when there is no live result.
     pub fn transcribe_recording(&self, samples: Vec<f32>) -> Result<String> {
+        // This recording's own remainder is armed later, inside finalize;
+        // clearing here only retires an unspent one from an earlier session
+        // (e.g. a recording cancelled between finalize and paste).
+        commit::clear_final_paste_prefix();
         let started = Instant::now();
+        // 停顿提交（pause-commit，批处理模型的“停顿即出字”）：段在录制
+        // 中已逐段转写并粘贴，这里只等尾段收尾，然后返回空串——调用方
+        // 对空结果既不二次粘贴也不做 LLM 后处理。finalize 是幂等兑底，
+        // 覆盖未来不经 stop_recording 就走到这里的路径。
+        if let Some(audio_manager) = self.app_handle.try_state::<Arc<AudioRecordingManager>>() {
+            if let Some(runner) = audio_manager.take_pause_commit_runner() {
+                runner.finalize();
+                runner.wait();
+                let committed = runner.committed_text();
+                debug!(
+                    "Pause-commit recording finished: {} segment(s), {} committed char(s), tail wait {:?}",
+                    runner.committed_segments(),
+                    committed.chars().count(),
+                    started.elapsed()
+                );
+                debug!(
+                    "Pause-commit committed text: {}",
+                    crate::utils::redact_text(&committed)
+                );
+                return Ok(String::new());
+            }
+        }
         let live = self.finalize_live(samples.len())?;
         self.complete(started, samples, live)
+    }
+
+    /// One committed pause-commit segment, decoded in batch while the
+    /// recording continues (or at its tail): the same setup and
+    /// post-processing as a whole-clip run, minus the idle-unload check —
+    /// more segments of the same recording follow, so the model stays
+    /// loaded. Called from the pause-commit worker thread only.
+    pub fn transcribe_segment(&self, audio: Vec<f32>) -> Result<String> {
+        if audio.is_empty() {
+            return Ok(String::new());
+        }
+        let started = Instant::now();
+        let outcome = self.decode_batch(audio)?;
+        let settings = get_settings(&self.app_handle);
+        let text = finish_text(outcome, &settings);
+        debug!(
+            "Segment decoded in {:?}: {} char(s)",
+            started.elapsed(),
+            text.chars().count()
+        );
+        Ok(text)
     }
 
     /// The final text of one transcription, from its live result or else a
@@ -1034,6 +1085,8 @@ impl TranscriptionManager {
         active_model: &str,
     ) -> Result<RunOutcome> {
         let setup = run_setup(&info, settings, validated_language);
+        // 不做"补静音到固定时长"：sol 判定那是边界 workaround，不是语音证据，
+        // 只有在特定模型/后端做过 A/B 证明有益时才能保留。
         let whole = |pcm: Vec<f32>| {
             self.run_batch(mark, pcm, &setup.run_options, active_model)
                 .map_err(engine_error)
@@ -1104,7 +1157,7 @@ fn finish_text(outcome: RunOutcome, settings: &AppSettings) -> String {
     post_process_transcription_text(
         text,
         settings,
-        setup.custom_words_prompted(),
+        setup.custom_words_prompted(&settings),
         &output_language,
         &setup.languages,
     )
@@ -1121,8 +1174,21 @@ struct RunSetup {
 
 impl RunSetup {
     /// Custom words went to the model as vocabulary; skip fuzzy correction.
-    fn custom_words_prompted(&self) -> bool {
-        !self.run_options.vocabulary.is_empty()
+    ///
+    /// vocabulary 是有界注入（128 词 / 1024 码点，见 vocabulary_for_model）：
+    /// 只有当全部有效手工词 primary（忽略空/注释行，不经预算截断）都
+    /// 实际注入时才算“已注入”；否则保留拉丁模糊纠错兜底，避免超出
+    /// 预算的手工词（如第 129 词）既未注入也永不纠错。
+    fn custom_words_prompted(&self, settings: &AppSettings) -> bool {
+        if self.run_options.vocabulary.is_empty() {
+            return false;
+        }
+        settings
+            .custom_words
+            .iter()
+            .map(|line| chinese_hotwords::parse_hotword_line(line).primary)
+            .filter(|p| !p.is_empty() && !p.starts_with('#'))
+            .all(|p| self.run_options.vocabulary.contains(&p))
     }
 
     /// What the output language is known to be, given the model's own
@@ -1150,12 +1216,16 @@ impl RunSetup {
 fn run_setup(info: &LoadedInfo, settings: &AppSettings, validated_language: &str) -> RunSetup {
     let model_supports_translate = info.capabilities.supports_translate;
     let languages = info.capabilities.languages.clone();
-    debug!(
-        "transcribe-cpp model '{}' on '{}': initial_prompt={}, vocabulary={}, translate={}, languages={:?}",
+    // 能力矩阵（决定我们走哪条路）：streaming → 真正的增量输出；
+    // vocabulary/initial_prompt → 热词偏置；否则只能靠停顿分段。
+    info!(
+        "Model capabilities: '{}' on '{}' streaming={} long_form={} vocabulary={} initial_prompt={} translate={} languages={:?}",
         settings.selected_model,
         info.backend,
-        info.supports_initial_prompt,
+        info.capabilities.supports_streaming,
+        info.supports_long_form,
         info.supports_vocabulary,
+        info.supports_initial_prompt,
         model_supports_translate,
         languages
     );
@@ -1166,6 +1236,16 @@ fn run_setup(info: &LoadedInfo, settings: &AppSettings, validated_language: &str
         &languages,
         model_supports_translate,
     );
+    // 诊断基线：出问题时用户只需回传这一行即可确认用的是哪个模型/语言。
+    info!(
+        "Transcribe run: model='{}' backend='{}' requested_language='{}' applied_language={:?} translate={} vocab_bias={}",
+        settings.selected_model,
+        info.backend,
+        validated_language,
+        run_plan.language,
+        settings.translate_to_english,
+        settings.decode_vocabulary_bias
+    );
     let output_was_translated = run_plan.target_language.as_deref() == Some("en");
     let applied_language_hint = run_plan.language.clone();
 
@@ -1173,7 +1253,22 @@ fn run_setup(info: &LoadedInfo, settings: &AppSettings, validated_language: &str
         task: run_plan.task,
         language: run_plan.language,
         target_language: run_plan.target_language,
-        vocabulary: vocabulary_for_model(info.supports_vocabulary, &settings.custom_words),
+        // 词库整合：vocabulary 用 effective_custom_words（手工词 + 导入
+        // 词库合并结果），不再仅 custom_words
+        // 预算按 sol 的实验包络（8 词 / 64 码点 / 单词 16 码点）而非旧的
+        // 128/1024：旧数字是资源上限，从未被证明是"安全偏置量"。
+        //
+        // 偏置来源只取**手工词**，不取导入的通用词库。
+        //
+        // 证据：导入 THUOCL 后 effective_custom_words 有上万条，预算截断
+        // 后注入的仍是 IT 类通用词（专家/创业/数据组织…）。对 LLM 式解码器
+        // （Qwen3-ASR 等）这等于把一大串无关词强塞进上下文，用户实测会输出
+        // 无关热词甚至重复。手工词才是"用户自己的词"，偏置收益高、风险低；
+        // 导入词库继续只参与拼音后处理。
+        vocabulary: vocabulary_for_model(
+            info.supports_vocabulary && settings.decode_vocabulary_bias,
+            &settings.custom_words,
+        ),
         // 上游 0.9.8 曾显式 use_itn=Some(true)；transcribe-cpp API 迁移到
         // itn 枚举时丢失，Fun-ASR 默认 DEFAULT→false 会往 prompt 追加
         // “不进行文本规整”，导致中文无标点。这里恢复开启。
@@ -1417,21 +1512,63 @@ fn with_model_detected_language(
     }
 }
 
+/// vocabulary 注入的词数预算：最多这么多个不同 primary（评审 P2：
+/// 词库导入后 LLM 解码上下文的 token 预算必须有界）。
+const VOCABULARY_MAX_TERMS: usize = 8;
+/// vocabulary 注入的总码点预算（Unicode 码点，中文一字一码点）。
+const VOCABULARY_MAX_CODEPOINTS: usize = 64;
+/// 单个词的最大码点数，超长视为无效词直接跳过。
+const VOCABULARY_MAX_TERM_CODEPOINTS: usize = 16;
+
 /// Custom words for transcribe-cpp's `vocabulary` slot, in priority order.
 /// Empty for models without Feature::Vocabulary, which would warn on every run
 /// and rely on fuzzy correction instead.
 /// 每行只取替换目标（第一个词）：别名与黑名单是拼音后处理的语法，
 /// 注入引擎的 LLM 解码器上下文没有意义且浪费 token 预算。
-fn vocabulary_for_model(supports_vocabulary: bool, custom_words: &[String]) -> Vec<String> {
-    if supports_vocabulary {
-        custom_words
-            .iter()
-            .map(|line| chinese_hotwords::parse_hotword_line(line).primary)
-            .filter(|p| !p.is_empty())
-            .collect()
-    } else {
-        Vec::new()
+///
+/// 有界注入（评审 P2）：保持 effective 顺序（手工词优先），primary
+/// 去重，跳过空/注释/超长（>64 码点）词；最多 `VOCABULARY_MAX_TERMS`
+/// 个词、总计 `VOCABULARY_MAX_CODEPOINTS` 个码点，预算装不下即止。
+/// 中文拼音后处理仍用全词表，不受此预算影响。
+fn vocabulary_for_model(supports_vocabulary: bool, effective_words: &[String]) -> Vec<String> {
+    if !supports_vocabulary {
+        return Vec::new();
     }
+    let mut out: Vec<String> = Vec::new();
+    let mut total_codepoints = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for line in effective_words {
+        if out.len() >= VOCABULARY_MAX_TERMS {
+            break;
+        }
+        let primary = chinese_hotwords::parse_hotword_line(line).primary;
+        // 跳过空段、井号注释行、超长词
+        if primary.is_empty() || primary.starts_with('#') {
+            continue;
+        }
+        let codepoints = primary.chars().count();
+        if codepoints > VOCABULARY_MAX_TERM_CODEPOINTS {
+            continue;
+        }
+        if !seen.insert(primary.clone()) {
+            continue; // 重复 primary
+        }
+        if total_codepoints + codepoints > VOCABULARY_MAX_CODEPOINTS {
+            break; // 码点预算装不下即止（保持 effective 顺序的前缀）
+        }
+        total_codepoints += codepoints;
+        out.push(primary);
+    }
+    if out.len() < effective_words.len() {
+        // 日志仅计数，不落词表内容
+        debug!(
+            "Vocabulary budget: {} effective word line(s) -> {} term(s), {} codepoint(s)",
+            effective_words.len(),
+            out.len(),
+            total_codepoints
+        );
+    }
+    out
 }
 
 struct TranscribeCppRunPlan {
@@ -1470,6 +1607,116 @@ fn transcribe_cpp_run_plan(
     }
 }
 
+/// FunASR 输出标记（Fun-ASR-Nano 等模型的特殊 token 会以字面量混进推理
+/// 结果，如“今天天气/sil很好”）。上游 funasr 在推理后把它们替换成空格
+/// 并折叠空白（batch 与单条推理同此）；transcribe-cpp 原样返回，所以
+/// 在这里清理。后续遇到新的标记只需追加到此表。
+const FUNASR_OUTPUT_MARKERS: &[&str] = &["/sil", "/nospeech", "/noise"];
+
+/// 清理 FunASR 输出标记，仅对含标记的文本生效：
+///
+/// - 每个标记替换为单个空格，随后折叠连续空白、去掉首尾空白；
+/// - 两侧都是汉字的空格删除（中文之间不插空格）；数字/拉丁两侧保留
+///   单个空格（与 FunASR 自身输出风格一致）；
+/// - 标记后紧跟 ASCII 字母/数字（如听写出的 `/silence`）视为普通文本
+///   不替换——拉丁字母、拼音、中文内容一概不删改；
+/// - 无标记文本逐字符原样返回（同一个 `String`，不重新分配）。
+///
+/// 清理后的既有 [`normalize_transcription_output`]（重复词折叠、多空格、
+/// 修剪）照常执行。原始输出在 debug 日志留档（脱敏），便于对照清理
+/// 前后。
+fn strip_funasr_markers(text: String) -> String {
+    if !FUNASR_OUTPUT_MARKERS.iter().any(|m| text.contains(m)) {
+        return text;
+    }
+    let raw = text.clone();
+    let replaced = replace_funasr_markers(&text);
+    let cleaned = collapse_marker_whitespace(&replaced);
+    debug!(
+        "FunASR marker cleanup: raw_output='{}' cleaned_output='{}'",
+        crate::utils::redact_text(&raw),
+        crate::utils::redact_text(&cleaned)
+    );
+    cleaned
+}
+
+/// 把 `text` 里的每个 [`FUNASR_OUTPUT_MARKERS`] 标记替换为单个空格。
+/// 标记后紧跟 ASCII 字母/数字时不替换：那是用户听写的 `/silence` 之类
+/// 普通文本（上游 funasr 用朴素 replace 会连带删掉后续拉丁字母，我们
+/// 明确不做）。
+fn replace_funasr_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '/' {
+            if let Some(marker) = FUNASR_OUTPUT_MARKERS
+                .iter()
+                .find(|m| text[idx..].starts_with(*m))
+            {
+                let end = idx + marker.len();
+                // 标记后紧跟 ASCII 字母/数字时不是标记，而是 `/silence`、
+                // `/sil3` 这类真实拉丁内容——保留原文，绝不删改用户听写出的
+                // 英文字母（sol 明确要求不要动拉丁/拼音）。标记后面是空白、
+                // 中文、标点或行尾时才按标记清理。
+                let followed_by_latin_word = text[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric());
+                if !followed_by_latin_word {
+                    out.push(' ');
+                    // 跳过标记剩余字符（peek 防越界：end 是字符边界）
+                    while let Some(&(next_idx, _)) = chars.peek() {
+                        if next_idx < end {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 折叠连续空白为单个空格、去掉首尾空白；两侧都是汉字的空格直接删除
+/// （Fun-ASR 把 `/sil` 粘在汉字之间，替换出的空格不能留在中文里）。
+/// 只对含标记文本调用。
+fn collapse_marker_whitespace(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    // 已输出的最后一个非空白字符，用于判断空格两侧是否都是汉字
+    let mut last_char: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if !ch.is_whitespace() {
+            out.push(ch);
+            last_char = Some(ch);
+            i += 1;
+            continue;
+        }
+        // 跳过整段空白，看向右侧第一个非空白字符
+        let mut j = i;
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if j == chars.len() {
+            break; // 尾部空白丢弃（trim）
+        }
+        let both_han =
+            last_char.is_some_and(chinese_hotwords::is_han) && chinese_hotwords::is_han(chars[j]);
+        // 首部空白丢弃（trim）；汉字之间的空白删除；其余保单个空格
+        if !both_han && last_char.is_some() {
+            out.push(' ');
+        }
+        i = j;
+    }
+    out
+}
+
 fn post_process_transcription_text(
     raw: String,
     settings: &AppSettings,
@@ -1479,6 +1726,10 @@ fn post_process_transcription_text(
 ) -> String {
     let converts_script = settings.chinese_script != ChineseScript::AsTranscribed;
     fail_open_text_transform(raw, |raw| {
+        // Fun-ASR 系模型会把 /sil 等标记混进原始输出；最先清理（上游
+        // funasr 也是推理后立即替换），让语言检测、简繁转换与热词规则
+        // 都看到干净文本。无标记文本逐字符不变。
+        let raw = strip_funasr_markers(raw);
         // Last-resort language evidence: confidence-gated detection from the
         // transcribed text itself, constrained to the model's languages. Only
         // consulted when it can change the outcome (built-in gated fillers or
@@ -1513,44 +1764,85 @@ fn post_process_transcription_text(
             _ => raw,
         };
 
-        let corrected = if chinese_hotwords::has_han(&raw) && !settings.custom_words.is_empty() {
-            // Voo 中文路径：拼音热词后处理（引擎无关；无论引擎 vocabulary
-            // 是否已注入都执行——拼音匹配对已正确的热词自匹配安全跳过），
-            // 随后应用正则替换规则（规则不会二次触碰拼音已替换区域）。
-            let index = chinese_hotwords::build_hotword_index(
-                &settings.custom_words,
+        // Voo 中文热词：中文路径用 effective 全词表（含导入词库）+ 四态
+        // 档位表的精确单槽缓存（锁内只比较/克隆、编译在锁外）。档位
+        // （key = 替换目标 primary，别名继承）在建索引展开条目前解析：
+        // Blocked 不建条目；Candidate 建条目但不进自动纠正（仅建议）；
+        // ActiveExact 走严格档（匹配时双侧常规读音校验，防词库词经多
+        // 音字凑对误改日常短语，如「什么时候」→「实模式候」）；
+        // ActiveFuzzy 走近音档。档位表参与缓存键，改档位即重编译。
+        // 非中文文本不触碰该大缓存：拉丁纠错只用手工词（纯汉字导入词对
+        // 拉丁路径无意义），规则走独立 rules-only 单槽缓存，避免 Latin
+        // 转写把中文大缓存换出（5 万词索引构建是毫秒级）。规则不被
+        // “无词表/非中文文本”卡死：拼音路径里规则只改未触碰区域，其余
+        // 路径全量应用。
+        // 非汉字文本彻底不构造 effective 全词表（50k 导入词的克隆/遍历
+        // 对 Latin 路径无意义）；has_han 为假时直接空表
+        let effective_words = chinese_hotwords::has_han(&raw)
+            .then(|| settings.effective_custom_words())
+            .unwrap_or_default();
+        let chinese_path = !effective_words.is_empty();
+
+        let corrected = if chinese_path {
+            // 中文路径：拼音热词替换，随后规则只改未触碰区域（防止对刚
+            // 替换出的热词二次改写，如拼音已输出“中州韵输入法”，规则
+            // `中州韵=中州韵输入法` 不会再叠加）
+            let term_modes = settings.effective_term_modes();
+            let hotwords = chinese_hotwords::shared_hotword_cache().get_or_build_with_modes(
+                &effective_words,
+                &settings.hotword_rules,
                 chinese_hotwords::DEFAULT_MIN_HAN,
+                &term_modes,
             );
             let opts = chinese_hotwords::ConfusionOptions {
                 dialect: settings.hotword_dialect_confusion,
             };
-            let (rules, rule_errors) =
-                chinese_hotwords::parse_hotword_rules(&settings.hotword_rules);
-            if !rule_errors.is_empty() {
-                warn!("Hotword rules failed to parse on lines {rule_errors:?}");
-            }
-            let (corrected, hits) = chinese_hotwords::apply_chinese_hotwords(
+            let (corrected, hits) = chinese_hotwords::apply_chinese_hotwords_indexed(
                 &raw,
-                &index,
-                &rules,
+                &hotwords,
                 settings.hotword_pinyin_threshold,
                 &opts,
             );
             for hit in &hits {
+                // 命中内容含语音原文/热词文本：release 构建按仓库惯例脱敏
                 info!(
                     "Chinese hotword: '{}' -> '{}' (similarity {:.2})",
-                    hit.matched, hit.replacement, hit.score
+                    crate::utils::redact_text(&hit.matched),
+                    crate::utils::redact_text(&hit.replacement),
+                    hit.score
                 );
             }
             corrected
-        } else if !settings.custom_words.is_empty() && !custom_words_already_prompted {
-            apply_custom_words(
-                &raw,
-                &settings.custom_words,
-                settings.word_correction_threshold,
-            )
         } else {
-            raw
+            // 非中文文本：拉丁 custom_words 模糊纠错只用手工词，不用
+            // effective 全词表（导入的纯汉字词对拉丁路径无意义）；
+            // 显式规则独立生效，全量应用
+            let base = if !settings.custom_words.is_empty() && !custom_words_already_prompted {
+                apply_custom_words(
+                    &raw,
+                    &settings.custom_words,
+                    settings.word_correction_threshold,
+                )
+            } else {
+                raw
+            };
+            let rules = chinese_hotwords::shared_rules_cache().rules_for(&settings.hotword_rules);
+            if rules.is_empty() {
+                base
+            } else {
+                chinese_hotwords::apply_hotword_rules(&base, &rules)
+            }
+        };
+
+        // 常用专名字面规范化（内置种子 + A 组开源专名源导入派生）：字面
+        // 词边界替换、大小写不敏感、幂等；优先级低于上面的用户规则链
+        // （用户同名规则键在编译期已剔除）；绝不参与拼音匹配。禁用开关
+        // 或无规则时这里是一次空规则直通。
+        let corrected = {
+            let config =
+                crate::managers::lexicon_sources::proper_noun_config_from_settings(settings);
+            let rules = crate::audio_toolkit::proper_nouns::effective_proper_noun_rules(&config);
+            rules.apply(&corrected)
         };
 
         let without_fillers = remove_filler_words(
@@ -2233,6 +2525,551 @@ mod tests {
             &supported,
         );
         assert_eq!(corrected, "i use Handy every day");
+    }
+
+    // ---------------- 中文热词：规则独立生效 / 缓存集成 ----------------
+
+    #[test]
+    fn proper_noun_literal_pass_normalizes_variants() {
+        // 默认开关开：变体被替换为规范写法，已正确写法与词边界内不动。
+        let settings = AppSettings::default();
+        let result = post_process_transcription_text(
+            "我用 deepseek 和 vscode".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我用 DeepSeek 和 VS Code");
+        // 词边界：更长词不被误伤。
+        let result = post_process_transcription_text(
+            "deepseekers 是另一个词".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "deepseekers 是另一个词");
+    }
+
+    #[test]
+    fn proper_noun_literal_pass_disabled_and_user_precedence() {
+        // 禁用开关：不加载任何规则。
+        let mut settings = AppSettings::default();
+        settings.proper_noun_lexicon_enabled = false;
+        let result = post_process_transcription_text(
+            "我用 deepseek".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我用 deepseek");
+
+        // 用户同名规则优先：专名规则链不得覆盖用户规则产物。
+        let settings = AppSettings {
+            hotword_rules: "deepseek=深度求索".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "deepseek 很强".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "深度求索 很强");
+    }
+
+    #[test]
+    fn hotword_rules_apply_without_custom_words_on_han_text() {
+        // 规则-only 配置：不被 custom_words.is_empty 卡死
+        let settings = AppSettings {
+            hotword_rules: "中州韵=中州韵输入法".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "我在用中州韵打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我在用中州韵输入法打字");
+    }
+
+    #[test]
+    fn hotword_rules_apply_to_non_han_text() {
+        // ASCII 规则不被“非汉字文本”卡死：作用于英文转写
+        let settings = AppSettings {
+            hotword_rules: "dont=>don't\nteh=the".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "i dont know teh answer".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result, "i don't know the answer");
+    }
+
+    #[test]
+    fn hotword_rules_apply_even_when_vocabulary_was_prompted() {
+        // 词表已注入引擎 vocabulary（拉丁模糊纠错跳过）不影响显式规则
+        let settings = AppSettings {
+            custom_words: vec!["Handy".to_string()],
+            hotword_rules: "handy=>Handy".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "i use handy every day".to_string(),
+            &settings,
+            true,
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result, "i use Handy every day");
+    }
+
+    #[test]
+    fn imported_lexicon_is_candidate_by_default_and_corrects_only_when_activated() {
+        // 四态模型：导入词默认 Candidate（只进建议、不改写）。这条测试同时钉住
+        // 两个方向——默认不乱改；显式提升为 ActiveExact 后才纠正完全同音错字。
+        let mut settings = AppSettings::default();
+        settings
+            .imported_lexicons
+            .insert("THUOCL".to_string(), vec!["中州韵输入法".to_string()]);
+
+        let untouched = post_process_transcription_text(
+            "我在用中州运输入法打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(
+            untouched, "我在用中州运输入法打字",
+            "Candidate 态不得改写文本（这正是「什么时候→实模式候」的防线）"
+        );
+
+        settings.lexicon_term_modes.insert(
+            "中州韵输入法".to_string(),
+            chinese_hotwords::TermMode::ActiveExact,
+        );
+        let corrected = post_process_transcription_text(
+            "我在用中州运输入法打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(
+            corrected, "我在用中州韵输入法打字",
+            "显式激活后才纠正同音错字"
+        );
+    }
+
+    #[test]
+    fn chinese_hotwords_and_rules_layer_through_post_process() {
+        // 拼音替换 + 规则分层：拼音区域不被规则二次改写，未触碰区域规则生效
+        let settings = AppSettings {
+            custom_words: vec!["中州韵输入法".to_string()],
+            hotword_rules: "很好用=非常好用\n中州韵=中州韵输入法".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "我在用中州运输入法，很好用".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我在用中州韵输入法，非常好用");
+    }
+
+    // ---------------- FunASR 输出标记清理（/sil 等） ----------------
+
+    #[test]
+    fn funasr_sil_marker_replaced_with_space_and_whitespace_collapsed() {
+        // 拉丁两侧：标记 → 单空格，原有空格一并折叠
+        assert_eq!(
+            strip_funasr_markers("hello /sil world".to_string()),
+            "hello world"
+        );
+        // 粘在词中间（无空格）也能清
+        assert_eq!(
+            // 后接拉丁字母视为真实单词（如 /silence、/silworld），不是标记
+            strip_funasr_markers("hello/silworld".to_string()),
+            "hello/silworld"
+        );
+        // 不同标记混用
+        assert_eq!(strip_funasr_markers("a /sil /noise b".to_string()), "a b");
+    }
+
+    #[test]
+    fn text_without_funasr_markers_is_returned_unchanged() {
+        let inputs = [
+            "",
+            "hello world",
+            "人工只能 wsl",
+            "已 完成，用时 3 秒",
+            "wsl/linux 路径",
+            "今天天气很好",
+        ];
+        for text in inputs {
+            assert_eq!(strip_funasr_markers(text.to_string()), text);
+        }
+    }
+
+    #[test]
+    fn funasr_markers_never_insert_spaces_inside_chinese() {
+        // 标记粘在汉字之间：替换后不留空格
+        assert_eq!(
+            strip_funasr_markers("今天天气/sil很好".to_string()),
+            "今天天气很好"
+        );
+        // 数字两侧仍保留单个空格（FunASR 输出风格）
+        assert_eq!(
+            strip_funasr_markers("用时 3/sil秒".to_string()),
+            "用时 3 秒"
+        );
+        // 中文与拉丁之间保留单个空格
+        assert_eq!(
+            strip_funasr_markers("人工只能/sil wsl".to_string()),
+            "人工只能 wsl"
+        );
+    }
+
+    #[test]
+    fn funasr_consecutive_markers_collapse_to_one_space() {
+        assert_eq!(
+            strip_funasr_markers("好/sil/sil/noise吗".to_string()),
+            "好吗"
+        );
+        // 拉丁单词两侧的空格保留一个：标记本身被清掉，字母不动
+        assert_eq!(
+            strip_funasr_markers("a /sil /sil /nospeech b".to_string()),
+            "a b"
+        );
+    }
+
+    #[test]
+    fn funasr_markers_at_start_middle_and_end() {
+        assert_eq!(
+            strip_funasr_markers("/sil你好/sil世界/sil".to_string()),
+            "你好世界"
+        );
+        assert_eq!(
+            strip_funasr_markers("/sil /sil hello world /noise".to_string()),
+            "hello world"
+        );
+        assert_eq!(strip_funasr_markers("你好/sil".to_string()), "你好");
+        assert_eq!(strip_funasr_markers("/sil".to_string()), "");
+    }
+
+    #[test]
+    fn funasr_cleanup_never_touches_latin_letters_or_pinyin() {
+        // 听写出的“/sil 开头”的普通词不是标记，不删改拉丁字母
+        assert_eq!(
+            strip_funasr_markers("please /silence your phone".to_string()),
+            "please /silence your phone"
+        );
+        assert_eq!(
+            strip_funasr_markers("版本/sil3 不能用".to_string()),
+            "版本/sil3 不能用"
+        );
+        // 真标记只删标记本身，拉丁内容一字不动
+        assert_eq!(
+            strip_funasr_markers("人工只能 /sil wsl".to_string()),
+            "人工只能 wsl"
+        );
+    }
+
+    #[test]
+    fn post_process_strips_funasr_markers_from_final_output() {
+        let settings = AppSettings::default();
+        let result = post_process_transcription_text(
+            "今天天气/sil很好/sil".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "今天天气很好");
+    }
+
+    #[test]
+    fn post_process_leaves_marker_free_text_unchanged() {
+        let settings = AppSettings::default();
+        let result = post_process_transcription_text(
+            "人工只能 wsl".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "人工只能 wsl");
+    }
+
+    #[test]
+    fn funasr_markers_coexist_with_hotword_rules() {
+        // 标记先清理，规则在干净文本上照常生效，不会把 /sil 带进匹配
+        let settings = AppSettings {
+            hotword_rules: "中州韵=中州韵输入法".to_string(),
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "我在用中州韵/sil打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我在用中州韵输入法打字");
+    }
+
+    #[test]
+    fn funasr_marker_cleanup_runs_before_chinese_pinyin_correction() {
+        // 标记先清掉，拼音纠错在干净文本上照常命中
+        let settings = AppSettings {
+            custom_words: vec!["中州韵输入法".to_string()],
+            ..Default::default()
+        };
+        let result = post_process_transcription_text(
+            "我在用中州运输入法/sil打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(result, "我在用中州韵输入法打字");
+    }
+
+    // ---------------- vocabulary 有界注入（评审 P2） ----------------
+
+    #[test]
+    fn decode_vocabulary_comes_from_manual_words_only() {
+        // 导入词库不得进入解码期偏置：只注入手工词。
+        let mut settings = AppSettings::default();
+        settings.custom_words = vec!["模型量化".to_string()];
+        settings.imported_lexicons.insert(
+            "IT".to_string(),
+            vec![
+                "专家".to_string(),
+                "创业".to_string(),
+                "数据组织".to_string(),
+            ],
+        );
+        let from_manual = vocabulary_for_model(true, &settings.custom_words);
+        assert_eq!(from_manual, vec!["模型量化".to_string()]);
+        let from_effective = vocabulary_for_model(true, &settings.effective_custom_words());
+        assert!(
+            from_effective.contains(&"专家".to_string()),
+            "对照组：用 effective 词表时导入词会进入偏置（这正是要避免的行为）"
+        );
+    }
+
+    #[test]
+    fn vocabulary_injection_is_bounded_for_large_lexicons() {
+        // 5 万词导入：vocabulary 有界 —— 最多 128 词、总计 1024 码点、
+        // 单词 ≤64 码点，全部去重，且保持 effective 顺序（前缀）。
+        // 前 128 词各 8 码点（5 汉字 + 3 数字）→ 128×8 = 1024，两预算同时装满
+        let words: Vec<String> = (0..50_000).map(|i| format!("词库词汇编{:03}", i)).collect();
+        let vocab = vocabulary_for_model(true, &words);
+        assert_eq!(vocab.len(), VOCABULARY_MAX_TERMS);
+        let total: usize = vocab.iter().map(|w| w.chars().count()).sum();
+        assert_eq!(total, VOCABULARY_MAX_CODEPOINTS);
+        assert!(vocab
+            .iter()
+            .all(|w| w.chars().count() <= VOCABULARY_MAX_TERM_CODEPOINTS));
+        let mut uniq = std::collections::HashSet::new();
+        assert!(vocab.iter().all(|w| uniq.insert(w.clone())));
+        assert_eq!(vocab.first().map(String::as_str), Some("词库词汇编000"));
+    }
+
+    #[test]
+    fn vocabulary_total_codepoint_budget_stops_fill() {
+        // 预算按 sol 的实验包络：8 词 / 64 码点。8 个 8 码点词恰好装满，
+        // 第 9 个装不下即止。
+        // 8 个 8 码点词恰好装满两个预算（8 词 / 64 码点），第 9 个起被拒。
+        let mut words: Vec<String> = (0..8).map(|i| format!("词词词词词词词{i}")).collect();
+        assert!(words.iter().all(|w| w.chars().count() == 8));
+        words.push("额外词".to_string());
+        words.push("再多一个".to_string());
+        let vocab = vocabulary_for_model(true, &words);
+        assert_eq!(vocab.len(), 8, "词数上限 8");
+        assert_eq!(vocab.iter().map(|w| w.chars().count()).sum::<usize>(), 64);
+        // 不支持 vocabulary 的模型返回空
+        assert!(vocabulary_for_model(false, &words).is_empty());
+    }
+
+    #[test]
+    fn vocabulary_skips_comments_empty_overlong_and_duplicates() {
+        let words = vec![
+            "# 注释行".to_string(),
+            "   ".to_string(),
+            format!("{}x", "a".repeat(16)),      // 17 码点超长，跳过
+            "中州韵输入法 | 中州韵".to_string(), // 只取 primary
+            "中州韵输入法".to_string(),          // 重复 primary，去重
+            "a".repeat(16),                      // 16 码点恰好接受
+        ];
+        let vocab = vocabulary_for_model(true, &words);
+        assert_eq!(vocab.len(), 2);
+        assert_eq!(vocab[0], "中州韵输入法");
+        assert_eq!(vocab[1], "a".repeat(16));
+    }
+
+    #[test]
+    fn vocabulary_keeps_manual_words_first() {
+        // effective 顺序手工词优先：vocabulary 首位是手工词
+        let mut settings = AppSettings::default();
+        settings.custom_words = vec!["手工词优先".to_string()];
+        settings.imported_lexicons.insert(
+            "THUOCL".to_string(),
+            (0..200).map(|i| format!("导入词汇编号{:03}", i)).collect(),
+        );
+        let effective = settings.effective_custom_words();
+        let vocab = vocabulary_for_model(true, &effective);
+        assert_eq!(vocab.first().map(String::as_str), Some("手工词优先"));
+        assert!(vocab.len() > 1);
+    }
+
+    // ---------------- Latin 路径不膨胀（评审 P2） ----------------
+
+    #[test]
+    fn latin_path_uses_manual_words_only_not_imported_lexicon() {
+        // 拉丁纠错只用手工词：导入词库（纯汉字）不参与 Latin 路径
+        let mut settings = AppSettings::default();
+        settings.custom_words = vec!["Handy".to_string()];
+        settings.imported_lexicons.insert(
+            "THUOCL".to_string(),
+            (0..1000).map(|i| format!("词库词汇编号{:03}", i)).collect(),
+        );
+        let result = post_process_transcription_text(
+            "i use handy every day".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result, "i use Handy every day");
+
+        // 只有导入词（无手工词）时，Latin 文本不被改写
+        let mut only_import = AppSettings::default();
+        only_import
+            .imported_lexicons
+            .insert("THUOCL".to_string(), vec!["人工智能".to_string()]);
+        let result2 = post_process_transcription_text(
+            "artificial intelligence".to_string(),
+            &only_import,
+            false,
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result2, "artificial intelligence");
+    }
+
+    #[test]
+    fn latin_path_rules_do_not_touch_chinese_hotword_cache() {
+        // Latin 文本 + 巨量导入词：规则照常生效（走独立 rules-only 缓存），
+        // 行为与“只有手工词”时一致，不因导入词膨胀
+        let rules_text = "teh=the";
+        let mut with_imports = AppSettings::default();
+        with_imports.custom_words = vec!["Handy".to_string()];
+        with_imports.hotword_rules = rules_text.to_string();
+        with_imports.imported_lexicons.insert(
+            "THUOCL".to_string(),
+            (0..20_000)
+                .map(|i| format!("词库词汇编号{:05}", i))
+                .collect(),
+        );
+        let mut manual_only = with_imports.clone();
+        manual_only.imported_lexicons.clear();
+
+        for settings in [&with_imports, &manual_only] {
+            let result = post_process_transcription_text(
+                "i use handy and teh docs".to_string(),
+                settings,
+                false,
+                &OutputLanguageEvidence::UserSelected("en".to_string()),
+                &languages(&["en"]),
+            );
+            assert_eq!(result, "i use Handy and the docs");
+        }
+    }
+
+    // ---------------- vocabulary 截断与模糊纠错兜底（评审 P2 回归） ----------------
+
+    fn setup_with_vocabulary(vocabulary: Vec<String>) -> RunSetup {
+        RunSetup {
+            run_options: RunOptions {
+                vocabulary,
+                ..Default::default()
+            },
+            languages: Vec::new(),
+            applied_language_hint: None,
+            output_was_translated: false,
+        }
+    }
+
+    #[test]
+    fn manual_words_beyond_vocabulary_budget_still_get_fuzzy_correction() {
+        // 超出预算的手工词未注入 vocabulary：custom_words_prompted 不得
+        // 误判“已注入”而关掉拉丁模糊纠错（否则预算外的词永不纠错）
+        let mut words: Vec<String> = (0..VOCABULARY_MAX_TERMS)
+            .map(|i| format!("handyword{i:03}"))
+            .collect();
+        words.push("Handy".to_string()); // 预算外（12cps×85 > 1024，先耗尽）
+        let settings = AppSettings {
+            selected_language: "en".to_string(),
+            custom_words: words.clone(),
+            ..Default::default()
+        };
+        let injected = vocabulary_for_model(true, &words);
+        assert!(injected.len() < words.len(), "预算必须截断");
+        assert!(!injected.contains(&"Handy".to_string()));
+        let setup = setup_with_vocabulary(injected);
+        assert!(!setup.custom_words_prompted(&settings));
+
+        // 集成：未注入的词仍走拉丁模糊纠错
+        let result = post_process_transcription_text(
+            "i use handy every day".to_string(),
+            &settings,
+            setup.custom_words_prompted(&settings),
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result, "i use Handy every day");
+    }
+
+    #[test]
+    fn manual_words_within_budget_keep_prompted_skip() {
+        // 预算内全部注入 → 已注入，跳过模糊纠错（原行为不变）；
+        // 注释/空行不算有效手工词，不参与判定
+        let words = vec![
+            "# 注释行".to_string(),
+            "   ".to_string(),
+            "Handy".to_string(),
+        ];
+        let settings = AppSettings {
+            selected_language: "en".to_string(),
+            custom_words: words.clone(),
+            ..Default::default()
+        };
+        let setup = setup_with_vocabulary(vocabulary_for_model(true, &words));
+        assert_eq!(setup.run_options.vocabulary, vec!["Handy".to_string()]);
+        assert!(setup.custom_words_prompted(&settings));
+
+        let result = post_process_transcription_text(
+            "i use handy every day".to_string(),
+            &settings,
+            setup.custom_words_prompted(&settings),
+            &OutputLanguageEvidence::UserSelected("en".to_string()),
+            &languages(&["en"]),
+        );
+        assert_eq!(result, "i use handy every day"); // 已注入：不改写
     }
 }
 

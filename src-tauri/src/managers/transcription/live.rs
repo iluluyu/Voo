@@ -8,6 +8,7 @@ use log::{debug, error, info};
 use transcribe_cpp::StreamOptions;
 
 use super::chunked::ChunkedDecode;
+use super::commit;
 use super::policy::LiveDecode;
 use super::{
     effective_language_for_model, emit_stream_text, join_chunks, lock_perf, run_setup,
@@ -44,6 +45,9 @@ impl<'a> LiveSession<'a> {
         if mode == LiveDecode::None {
             return None;
         }
+        // 上一场录音若留下未消费的增量扣减（例如取消后没走到最终粘贴），
+        // 在这里作废，绝不影响这一场。
+        commit::clear_final_paste_prefix();
         // The same run setup as the batch path: task + language gated
         // against what the model actually advertises.
         let settings = get_settings(&tm.app_handle);
@@ -125,7 +129,8 @@ fn finish_chunks(
 }
 
 /// A stream the model decodes as audio arrives, with preview text emitted
-/// to the overlay.
+/// to the overlay and, when incremental commit is on, each growth of the
+/// committed prefix pasted to the target app as it happens.
 struct StreamSession<'a> {
     tm: &'a TranscriptionManager,
     model_id: String,
@@ -134,6 +139,9 @@ struct StreamSession<'a> {
     /// In auto mode the model's own LID is the best remaining evidence; the
     /// snapshot is only materialized when it can change the outcome.
     want_language: bool,
+    /// Pastes committed growth incrementally when enabled; a no-op handle
+    /// otherwise.
+    committer: commit::StreamCommitter,
 }
 
 impl<'a> StreamSession<'a> {
@@ -147,8 +155,15 @@ impl<'a> StreamSession<'a> {
         let output_language = setup.output_language(settings, None);
 
         // Feed results arrive on the engine's thread; this callback only
-        // converts and emits preview text.
+        // converts, emits preview text, and offers the converted committed
+        // prefix to the incremental committer (a channel send — it never
+        // blocks this thread, let alone the audio callback).
         let perf = Arc::new(Mutex::new(StreamPerf::new()));
+        let committer = commit::StreamCommitter::start(tm.app_handle.clone(), settings);
+        let committer_for_progress = committer.clone();
+        if committer.enabled() {
+            info!("Incremental commit active: committed text will be pasted as it grows");
+        }
         let on_progress = {
             let perf = Arc::clone(&perf);
             let app_handle = tm.app_handle.clone();
@@ -163,6 +178,9 @@ impl<'a> StreamSession<'a> {
                     let (committed, tentative) =
                         preview_script.convert(&text.committed, &text.tentative, &languages);
                     emit_stream_text(&app_handle, &committed, &tentative);
+                    // Only the committed prefix is ever pasted; tentative
+                    // text stays preview-only.
+                    committer_for_progress.submit(&committed);
                 }
                 perf.maybe_log();
             }
@@ -197,6 +215,7 @@ impl<'a> StreamSession<'a> {
             stream,
             perf,
             want_language: matches!(output_language, OutputLanguageEvidence::Unknown),
+            committer,
         })
     }
 
@@ -205,7 +224,7 @@ impl<'a> StreamSession<'a> {
         self.stream.feed(pcm);
     }
 
-    fn finish(self) -> Result<Option<Decoded>, EngineError> {
+    fn finish(mut self) -> Result<Option<Decoded>, EngineError> {
         let result = match self.stream.finalize(self.want_language) {
             // After finalize the committed prefix holds the full text;
             // display() = committed + tentative is the safe read.
@@ -238,6 +257,14 @@ impl<'a> StreamSession<'a> {
                 Err(e)
             }
         };
+        // 增量上屏收尾：等粘贴线程把队列里的已提交增量全部落地，再把
+        // “已经上屏了什么”交给最终粘贴去扣减——最终只补最后差额，
+        // 绝不整段重贴。取消（本方法不被调用，句柄直接 drop）则由
+        // Drop 放弃队列，不提交任何残留。
+        let pasted = self.committer.flush();
+        if !pasted.is_empty() {
+            commit::arm_final_paste_prefix(pasted);
+        }
         let chars = match &result {
             Ok(Some((text, _))) => text.len(),
             _ => 0,

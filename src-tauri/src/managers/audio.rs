@@ -7,7 +7,8 @@ use crate::audio_toolkit::{
     CaptureSink, CaptureVad, SileroVad, SpeechScorer, VadPolicy, VoiceActivityDetector,
 };
 use crate::helpers::clamshell;
-use crate::managers::transcription::StreamRouter;
+use crate::managers::pause_commit_runner::PauseCommitRunner;
+use crate::managers::transcription::{StreamRouter, TranscriptionManager};
 use crate::settings::{get_settings, write_settings, AppSettings, VadBackend};
 use crate::utils;
 use handy_recorder::{Channels, EndReason, ErrorKind, Recorder, RecorderConfig, StartError};
@@ -232,6 +233,43 @@ fn restore_mute(prev_muted: Option<bool>) {
 }
 
 const WHISPER_SAMPLE_RATE: usize = 16000;
+
+/// 停顿提交（“停顿即出字”）未启用的**第一条**原因（全部条件满足时为
+/// `None`，即启用）。纯函数，供测试与启动日志使用。
+///
+/// 启用条件，三条同时满足：
+///
+/// 1. 用户打开 `incremental_commit`；
+/// 2. 本次录音的 VAD 策略是离线批处理（`Offline` 恰好对应“VAD 开且模型
+///    非流式”：流式模型走 `Streaming`，VAD 关闭走 `Disabled`——没有 VAD
+///    判定就无法分段）；
+/// 3. 帧流没有其它实时消费者（流式/长录音切块的 worker 已打开
+///    router），否则会双重出字。
+///
+/// 任一条不满足都保持既有整段转写路径，行为逐字节不变；但用户已打开
+/// 增量上屏却静默回退最难排查，所以启动时会把这里返回的原因打进
+/// INFO 日志（设置本身关闭时保持安静，默认行为不变）。
+fn pause_commit_disabled_reason(
+    incremental_commit: bool,
+    vad_policy: VadPolicy,
+    router_open: bool,
+) -> Option<&'static str> {
+    if !incremental_commit {
+        Some("incremental commit setting is off")
+    } else if vad_policy != VadPolicy::Offline {
+        Some(match vad_policy {
+            VadPolicy::Streaming => {
+                "VAD policy is Streaming (live-capable model), not offline batch"
+            }
+            VadPolicy::Disabled => "VAD is disabled, so there are no verdicts to segment",
+            VadPolicy::Offline => unreachable!("checked above"),
+        })
+    } else if router_open {
+        Some("a live transcription worker already consumes the frame stream (streaming or long-form chunking)")
+    } else {
+        None
+    }
+}
 
 /* ──────────────────────────────────────────────────────────────── */
 
@@ -464,6 +502,15 @@ pub struct AudioRecordingManager {
     /// VAD-passed frames for live streaming, via a shared `StreamRouter`
     /// (captured directly, not via Tauri state — see its docs).
     on_audio: AudioFrameCallback,
+    /// The same router `on_audio` feeds; queried at recording start to tell
+    /// live decode consumers (streaming / long-form chunking) from a pure
+    /// batch recording, which pause-commit may take over.
+    stream_router: Arc<StreamRouter>,
+    /// The active recording's pause-commit runner, when "commit on pause"
+    /// took over a batch recording. Set at recording start, finalized at
+    /// stop, taken by `TranscriptionManager::transcribe_recording` or
+    /// aborted on cancel.
+    pause_commit: Arc<Mutex<Option<Arc<PauseCommitRunner>>>>,
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
     mute_state: Arc<Mutex<MuteState>>,
@@ -506,7 +553,10 @@ impl AudioRecordingManager {
             let app_handle = app.clone();
             Arc::new(move |levels| utils::emit_levels(&app_handle, &levels))
         };
-        let on_audio: AudioFrameCallback = Arc::new(move |frame| stream_router.feed(frame));
+        let on_audio: AudioFrameCallback = Arc::new({
+            let stream_router = Arc::clone(&stream_router);
+            move |frame| stream_router.feed(frame)
+        });
 
         let manager = Self {
             state: Arc::new(Mutex::new(RecordingState::Idle)),
@@ -518,6 +568,8 @@ impl AudioRecordingManager {
             selected_channel: Arc::new(Mutex::new(settings.selected_channel)),
             on_levels,
             on_audio,
+            stream_router,
+            pause_commit: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
             mute_state: Arc::new(Mutex::new(MuteState::default())),
@@ -913,6 +965,12 @@ impl AudioRecordingManager {
             let _ = self.collect_recording(&microphone);
             *is_recording = false;
         }
+        // The recording on a closed microphone is lost: its pause-commit
+        // segments are dropped, not pasted. No-op when the runner was already
+        // finalized (finalize takes the channel first) or never existed.
+        if let Some(runner) = self.take_pause_commit_runner() {
+            runner.abort();
+        }
         if let Err(e) = microphone.recorder.close() {
             warn!("Closing the microphone failed: {e}");
         }
@@ -1009,6 +1067,14 @@ impl AudioRecordingManager {
         // closes are never scheduled).
         self.close_generation.fetch_add(1, Ordering::SeqCst);
 
+        // A runner left behind by a previous session (its stop was cancelled
+        // before it drained) is detached here: `abort` is idempotent and the
+        // worker exits on its own without pasting anything more.
+        if let Some(stale) = self.take_pause_commit_runner() {
+            warn!("Discarding an unfinished pause-commit runner from a previous recording");
+            stale.abort();
+        }
+
         // A recorder can fail just before this start, ahead of its failure
         // handler; the start then reports it. Reopen and try once more.
         let mut reopened = false;
@@ -1023,23 +1089,60 @@ impl AudioRecordingManager {
             }
 
             let (ready_tx, receiver) = mpsc::channel();
-            let sink = CaptureSink::new(
-                self.lend_vad()?,
+            let settings = get_settings(&self.app_handle);
+            let level_normalization = settings.input_level_normalization;
+            let mut vad = self.lend_vad()?;
+            let frame_samples = vad.frame_samples();
+            // 停顿即出字（pause-commit）：仅批处理录音（增量开关 + 离线
+            // VAD 策略 + 无实时转写消费者）接管；否则不创建 runner，
+            // 采集与整段转写路径与以前逐字节一致。用户开了增量上屏却
+            // 回退时，把第一条不满足的门控写进 INFO 日志（设置关时
+            // 不打印，默认路径零变化）。
+            let pause_commit_runner = match pause_commit_disabled_reason(
+                settings.incremental_commit,
+                vad_policy,
+                self.stream_router.is_open(),
+            ) {
+                None => {
+                    // sink 将对该策略应用 hangover_frames_for(policy)
+                    // 帧 hangover；用同一数值折算毫秒交给分段器，让
+                    // “确认静音”回到真实时间轴（不再叠加成 ~900 ms）。
+                    let hangover_ms = (vad.hangover_frames_for(vad_policy) * frame_samples * 1000
+                        / WHISPER_SAMPLE_RATE) as u32;
+                    self.spawn_pause_commit_runner(frame_samples, hangover_ms)
+                }
+                Some(reason) => {
+                    log::info!(
+                        "pause-commit disabled ({reason}); this recording stays whole-clip batch"
+                    );
+                    None
+                }
+            };
+            let mut sink = CaptureSink::new(
+                vad,
                 vad_policy,
                 Arc::clone(&self.on_levels),
                 Arc::clone(&self.on_audio),
                 ready_tx,
+                level_normalization,
             );
+            if let Some(runner) = pause_commit_runner.as_ref() {
+                sink.set_vad_verdict_callback(runner.verdict_sink());
+            }
 
             let recorder = self.recorder.lock().unwrap();
             let Some(microphone) = recorder.as_ref() else {
                 self.return_vad(sink.into_vad());
+                if let Some(runner) = &pause_commit_runner {
+                    runner.abort();
+                }
                 return Err(anyhow::anyhow!("Recorder not available"));
             };
             match microphone.recorder.start(sink) {
                 Ok(()) => {
                     let generation = self.capture_generation.fetch_add(1, Ordering::AcqRel) + 1;
                     *self.is_recording.lock().unwrap() = true;
+                    *self.pause_commit.lock().unwrap() = pause_commit_runner;
                     self.set_state(
                         &mut state,
                         RecordingState::Recording {
@@ -1054,6 +1157,9 @@ impl AudioRecordingManager {
                 }
                 Err(StartError { error, sink }) => {
                     self.return_vad(sink.into_vad());
+                    if let Some(runner) = &pause_commit_runner {
+                        runner.abort();
+                    }
                     if reopened || error.kind() == ErrorKind::AlreadyRecording {
                         return Err(anyhow::Error::new(error).context("Failed to start recorder"));
                     }
@@ -1063,6 +1169,40 @@ impl AudioRecordingManager {
                 }
             }
         }
+    }
+
+    /// Starts this recording's pause-commit runner, when "commit on pause"
+    /// takes over a batch recording. The runner's worker owns per-segment
+    /// transcription and pasting; the audio callback only feeds its tap.
+    fn spawn_pause_commit_runner(
+        &self,
+        frame_samples: usize,
+        hangover_ms: u32,
+    ) -> Option<Arc<PauseCommitRunner>> {
+        let Some(transcription) = self
+            .app_handle
+            .try_state::<Arc<TranscriptionManager>>()
+            .map(|state| Arc::clone(state.inner()))
+        else {
+            warn!("pause-commit: TranscriptionManager unavailable; recording stays batch");
+            return None;
+        };
+        let generation = self.cancel_generation.load(Ordering::Acquire);
+        Some(PauseCommitRunner::start(
+            self.app_handle.clone(),
+            transcription,
+            Arc::clone(&self.cancel_generation),
+            generation,
+            frame_samples,
+            hangover_ms,
+        ))
+    }
+
+    /// Takes this recording's pause-commit runner, if "commit on pause" is
+    /// active. `TranscriptionManager::transcribe_recording` calls this at stop
+    /// to wait for the tail; cancel paths call it to abort.
+    pub fn take_pause_commit_runner(&self) -> Option<Arc<PauseCommitRunner>> {
+        self.pause_commit.lock().unwrap().take()
     }
 
     /// Replace the VAD implementation while idle. If the microphone stream is
@@ -1213,6 +1353,14 @@ impl AudioRecordingManager {
                     }
                 };
 
+                // 停顿提交：采集已结束，冲出尾段并让 worker 清完队列后
+                // 自行退出；`TranscriptionManager::transcribe_recording`
+                // 会取走 runner 并等它收尾。留在此槽中是为了跨过
+                // stop 与转写之间的窗口。幂等，不阻塞本线程。
+                if let Some(runner) = self.pause_commit.lock().unwrap().as_ref() {
+                    runner.finalize();
+                }
+
                 *self.is_recording.lock().unwrap() = false;
                 self.set_state(&mut self.state.lock().unwrap(), RecordingState::Idle);
 
@@ -1266,6 +1414,12 @@ impl AudioRecordingManager {
 
                 if let Some(microphone) = self.recorder.lock().unwrap().as_ref() {
                     let _ = self.collect_recording(microphone); // Discard the result
+                }
+
+                // 取消：未处理的段直接丢弃（worker 的取消检查也会拦住
+                // 排队中的段），不再转写、不再粘贴。
+                if let Some(runner) = self.take_pause_commit_runner() {
+                    runner.abort();
                 }
 
                 *self.is_recording.lock().unwrap() = false;
@@ -1338,5 +1492,64 @@ mod tests {
         assert_eq!(second.channels, Channels::Only(1));
         assert_eq!(second.device.as_deref(), Some("id"));
         assert_eq!(second.frames_per_chunk, Some(256));
+    }
+
+    #[test]
+    fn pause_commit_gate_reason_names_the_first_false_condition() {
+        use crate::audio_toolkit::audio::VadPolicy;
+
+        // 全部满足：无原因（启用）。
+        assert_eq!(
+            pause_commit_disabled_reason(true, VadPolicy::Offline, false),
+            None
+        );
+        // 逐条为假，各得具名原因。
+        assert_eq!(
+            pause_commit_disabled_reason(false, VadPolicy::Offline, false),
+            Some("incremental commit setting is off")
+        );
+        assert_eq!(
+            pause_commit_disabled_reason(true, VadPolicy::Streaming, false),
+            Some("VAD policy is Streaming (live-capable model), not offline batch")
+        );
+        assert_eq!(
+            pause_commit_disabled_reason(true, VadPolicy::Disabled, false),
+            Some("VAD is disabled, so there are no verdicts to segment")
+        );
+        assert_eq!(
+            pause_commit_disabled_reason(true, VadPolicy::Offline, true),
+            Some("a live transcription worker already consumes the frame stream (streaming or long-form chunking)")
+        );
+        // 顺序：设置 → 策略 → 实时消费者。
+        assert_eq!(
+            pause_commit_disabled_reason(false, VadPolicy::Streaming, true),
+            Some("incremental commit setting is off")
+        );
+        assert_eq!(
+            pause_commit_disabled_reason(true, VadPolicy::Streaming, true),
+            Some("VAD policy is Streaming (live-capable model), not offline batch")
+        );
+    }
+
+    #[test]
+    fn pause_commit_gate_reason_covers_every_combination_consistently() {
+        use crate::audio_toolkit::audio::VadPolicy;
+
+        for &incremental in &[false, true] {
+            for policy in [
+                VadPolicy::Disabled,
+                VadPolicy::Offline,
+                VadPolicy::Streaming,
+            ] {
+                for &router in &[false, true] {
+                    let reason = pause_commit_disabled_reason(incremental, policy, router);
+                    assert_eq!(
+                        reason.is_none(),
+                        incremental && policy == VadPolicy::Offline && !router,
+                        "{incremental}/{policy:?}/{router} → {reason:?}"
+                    );
+                }
+            }
+        }
     }
 }
