@@ -16,7 +16,8 @@
     "postProcessing": "後處理",
     "history": "歷史紀錄",
     "debug": "偵錯",
-    "about": "關於"
+    "about": "關於",
+    "lexicon": "詞庫"
   },
   "onboarding": {
     "subtitle": "首先，請選擇一種模型",
@@ -349,20 +350,35 @@
         "placeholder": "新增詞彙",
         "add": "新增",
         "remove": "刪除 {{word}}",
-        "duplicate": "「{{word}}」已存在"
+        "duplicate": "「{{word}}」已存在",
+        "bulkAdd": "批量新增",
+        "bulkPlaceholder": "一行一筆（支援 目標|別名~~~黑名單）",
+        "bulkPreview": "新增 {{added}} 筆，重複 {{duplicates}} 筆，略過 {{invalid}} 筆",
+        "bulkConfirm": "確認新增",
+        "bulkCancel": "取消",
+        "bulkDone": "已新增 {{count}} 筆",
+        "export": "匯出",
+        "count": "共 {{count}} 筆",
+        "searchPlaceholder": "搜尋詞條…",
+        "showMore": "顯示更多（剩餘 {{count}}）"
       },
       "lexiconImport": {
         "title": "匯入詞庫（THUOCL）",
-        "description": "從清華 THUOCL 開放詞庫匯入分類詞彙。匯入時會過濾（純漢字、3–50 字）並依詞頻取前 5000 個詞，確認後附加到自訂詞彙。",
+        "description": "從清華 THUOCL 開放詞庫匯入分類詞彙，作為可管理的詞庫來源（純漢字、3–50 字、依詞頻取前 5000）。匯入詞與手動詞分開儲存，可依來源更新或移除。",
         "fetch": "取得詞庫",
         "fetching": "正在下載…",
-        "append": "附加到自訂詞彙",
+        "save": "儲存為詞庫來源",
         "cancel": "取消",
         "selectHint": "請先選擇至少一個分類",
-        "preview": "將附加 {{count}} 個詞",
+        "preview": "將匯入 {{count}} 個詞",
         "emptyResult": "沒有可附加的新詞（已過濾或全部重複）",
         "error": "匯入失敗：{{message}}",
-        "success": "已附加 {{count}} 個詞",
+        "success": "已儲存 {{count}} 個詞",
+        "saveError": "儲存失敗：{{message}}",
+        "removeError": "移除失敗：{{message}}",
+        "installed": "已安裝來源",
+        "wordCount": "{{count}} 個詞",
+        "removeSource": "移除 {{source}}",
         "categories": {
           "IT": "資訊科技",
           "animal": "動物",
@@ -375,7 +391,55 @@
           "lishimingren": "歷史名人",
           "medical": "醫學",
           "poem": "詩詞"
-        }
+        },
+        "fromFile": "從本機檔案匯入…",
+        "copyError": "複製錯誤詳情",
+        "copied": "錯誤詳情已複製",
+        "removeConfirm": "確認移除「{{source}}」？",
+        "removeConfirmYes": "確認移除"
+      },
+      "recentCandidates": {
+        "title": "最近常出現",
+        "description": "從最近 30 天歷史中本地提取的高頻候選詞。僅作建議，不會自動啟用。「提升為熱詞」把詞加入自訂熱詞；「忽略」只在本次工作階段內隱藏，不寫入磁碟。",
+        "refresh": "重新整理",
+        "loading": "正在分析…",
+        "error": "分析歷史失敗：{{message}}",
+        "count": "{{count}} 次",
+        "promote": "提升為熱詞",
+        "ignore": "忽略",
+        "promoted": "已把「{{term}}」加入自訂熱詞",
+        "exists": "「{{term}}」已在熱詞表中",
+        "score": "score {{docs}}",
+        "scoreHint": "score = 出現過該詞的轉寫條數（越多越可信）。",
+        "copyError": "複製錯誤",
+        "copied": "已複製",
+        "ignoreAll": "全部忽略"
+      },
+      "learnedCandidates": {
+        "title": "已學習的修正",
+        "description": "從貼上修改中本地學習到的詞對（原詞 → 新詞），均未啟用。採納會把該對寫入自訂熱詞；撤銷會刪除該候選並阻止再次學習。",
+        "refresh": "重新整理",
+        "loading": "載入中…",
+        "count": "{{count}} 次",
+        "adopt": "採納",
+        "undo": "撤銷",
+        "adopted": "已把「{{wrong}} → {{corrected}}」寫入自訂熱詞",
+        "exists": "「{{wrong}} → {{corrected}}」已在詞表中",
+        "undone": "已撤銷 {{count}} 條學習記錄",
+        "error": "載入學習記錄失敗：{{message}}",
+        "copyError": "複製錯誤",
+        "copied": "已複製"
+      },
+      "llmCandidates": {
+        "title": "LLM 候選",
+        "description": "詞庫整理候選的唯讀預覽（詞條及其建議變體）。僅在 preview_lexicon_curation 命令可用時顯示，不會自動生效。",
+        "refresh": "重新整理",
+        "loading": "載入中…",
+        "count": "{{count}} 次",
+        "variants": "變體：{{aliases}}",
+        "error": "載入 LLM 候選失敗：{{message}}",
+        "copyError": "複製錯誤",
+        "copied": "已複製"
       },
       "hotwordRules": {
         "title": "中文熱詞規則",
@@ -420,17 +484,50 @@
           "simplified": "簡體",
           "traditional": "繁體"
         }
+      },
+      "inputLevelNormalization": {
+        "title": "輸入電平調理",
+        "description": "把輕聲和大聲都收進模型最容易辨識的電平區間。作用在語音偵測之前，帶底噪估計和 -3 dBFS 限幅。"
+      },
+      "incrementalCommit": {
+        "title": "增量上屏",
+        "description": "錄音過程中就把已確定的文字上屏，而不是停止後一次性貼上。串流模型用引擎的已確認前綴，批次模型在停頓處提交。"
+      },
+      "decodeVocabularyBias": {
+        "title": "解碼期詞表偏置",
+        "description": "把熱詞交給模型在解碼階段參考。部分模型會被帶偏（如 Qwen3-ASR 會輸出無關熱詞），關閉後只保留拼音後處理糾錯。"
+      },
+      "candidateList": {
+        "expand": "展開",
+        "collapse": "摺疊",
+        "summary": "保留 {{count}} 個候選"
       }
     },
     "postProcessing": {
       "hotkey": {
         "title": "快捷鍵"
       },
+      "trigger": {
+        "title": "觸發",
+        "alwaysNote": "普通聽寫會自動後處理",
+        "mode": {
+          "title": "觸發方式",
+          "description": "決定何時對聽寫結果進行後處理。",
+          "always": "每次聽寫都後處理",
+          "separate": "僅專用快捷鍵"
+        }
+      },
       "api": {
         "title": "API",
         "provider": {
           "title": "供應商",
-          "description": "選擇一個相容 OpenAI 或 Anthropic 的供應商"
+          "description": "選擇一個相容 OpenAI 或 Anthropic 的供應商",
+          "add": "新增自訂供應商",
+          "defaultLabel": "自訂 {{number}}",
+          "delete": "刪除",
+          "deleteProvider": "刪除自訂供應商",
+          "limitReached": "自訂供應商已達上限（{{count}} 個）。請先刪除再新增。",
+          "unsaved": "該自訂供應商僅存在於本次工作階段，應用程式重啟後會消失。"
         },
         "apiFormat": {
           "title": "API 格式",
@@ -461,6 +558,13 @@
           "placeholderWithOptions": "搜尋或選擇模型",
           "placeholderNoOptions": "輸入模型名稱",
           "refreshModels": "重新整理模型"
+        }
+      },
+      "context": {
+        "title": "上下文",
+        "toggle": {
+          "label": "傳送焦點應用程式上下文",
+          "description": "後處理錄音開始時（Voo 顯示懸浮窗之前），會一次性擷取目前焦點應用程式名稱，以及（Windows 與可取得資訊的 macOS 上）游標前最多 128 個字元的文字，並將其傳送給你設定的 LLM 服務商，用於修正寫法與術語。絕不擷取視窗標題；後處理關閉時不會擷取任何內容。"
         }
       },
       "prompts": {
@@ -499,7 +603,20 @@
       "retranscribe": "重新轉錄",
       "retranscribeError": "重新轉錄失敗，請重試。",
       "transcribing": "轉錄中...",
-      "transcriptionFailed": "轉錄失敗。您可以使用重試圖示重新轉錄。"
+      "transcriptionFailed": "轉錄失敗。您可以使用重試圖示重新轉錄。",
+      "rememberCorrection": {
+        "title": "記住這條修正",
+        "description": "把這次糾正儲存為自訂熱詞（「正確 | 錯誤」），以後的轉寫會自動修正。",
+        "correctLabel": "正確寫法",
+        "correctPlaceholder": "應該輸出的文字",
+        "wrongLabel": "錯誤寫法（選填）",
+        "wrongPlaceholder": "被聽錯的文字（選取後自動填入）",
+        "save": "儲存",
+        "cancel": "取消",
+        "saved": "已儲存為熱詞。",
+        "duplicate": "該修正已存在。",
+        "error": "儲存失敗：{{error}}"
+      }
     },
     "debug": {
       "title": "偵錯",
@@ -666,6 +783,73 @@
       "whatsNewUpdates": {
         "label": "顯示新功能",
         "description": "Voo 更新後顯示版本資訊"
+      }
+    },
+    "lexicon": {
+      "groups": {
+        "words": "自訂詞彙與熱詞規則",
+        "sources": "詞庫來源",
+        "candidates": "候選詞",
+        "curation": "AI 整理"
+      },
+      "curation": {
+        "label": "AI 定時整理詞庫",
+        "description": "背景定期把歷史中的高頻詞整理為熱詞候選。需要已設定後處理服務商；未設定時不會發起任何請求。",
+        "strategy": "觸發條件：歷史每新增 200 條，或距上次整理 ≥ 7 天；在應用程式啟動後與每次轉錄儲存後檢查。",
+        "throttle": "同一時刻至多一個整理任務，每次至多一次 LLM 請求；請求失敗後 24 小時內不再重試。候選詞不會自動生效。",
+        "runNow": "立即整理",
+        "running": "檢查中…",
+        "count": "目前候選：{{count}} 條",
+        "error": "取得整理候選失敗：{{message}}"
+      },
+      "sources": {
+        "title": "開源詞庫來源",
+        "description": "從精選開源詞庫依來源匯入詞快照。每個來源都先預覽確認再寫入；不提供「全部匯入」。",
+        "groupProperNouns": "專名 / 術語（推薦）",
+        "groupDomainHan": "中文領域詞",
+        "groupFrequencyBaseline": "詞頻基準（預設摺疊）",
+        "groupOther": "其他來源",
+        "thuoclHint": "THUOCL 分類詞庫仍保留下方原有入口。",
+        "recommended": "推薦",
+        "notRecommended": "不建議直接匯入",
+        "statusInstalled": "已安裝 · {{count}} 詞",
+        "statusNotInstalled": "未安裝",
+        "import": "匯入",
+        "update": "更新",
+        "remove": "移除",
+        "removing": "正在移除…",
+        "installedTitle": "已安裝來源",
+        "removeConfirm": "確認移除 {{source}}？",
+        "removeConfirmYes": "確認移除",
+        "cancel": "取消",
+        "removeError": "移除失敗：{{message}}",
+        "empty": "暫無可用來源。",
+        "loadError": "載入來源清單失敗：{{message}}",
+        "loading": "正在載入來源…",
+        "copyError": "複製錯誤詳情",
+        "copied": "已複製",
+        "dialog": {
+          "titleImport": "匯入 {{source}}",
+          "titleUpdate": "更新 {{source}}",
+          "version": "版本：{{version}}",
+          "loadingPreview": "正在擷取並解析詞庫…",
+          "previewError": "預覽失敗：{{message}}",
+          "confirmError": "匯入失敗：{{message}}",
+          "success": "已儲存 {{count}} 個詞",
+          "entries": "資格 + 範圍篩選後條目：{{count}}",
+          "filtered": "常用詞過濾捨棄：{{count}}",
+          "kept": "將匯入詞數：{{count}}",
+          "samples": "前 {{count}} 條樣例",
+          "noWeight": "—",
+          "scope": "範圍",
+          "scope_all": "全部",
+          "scope_latin_only": "僅拉丁",
+          "scope_han_only": "僅中文",
+          "limit": "上限",
+          "confirmImport": "匯入 {{count}} 詞",
+          "confirmUpdate": "以 {{count}} 詞取代快照",
+          "confirming": "正在匯入…"
+        }
       }
     }
   },

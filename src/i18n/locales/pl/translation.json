@@ -16,7 +16,8 @@
     "postProcessing": "Postproces",
     "history": "Historia",
     "debug": "Debugowanie",
-    "about": "O programie"
+    "about": "O programie",
+    "lexicon": "Lexicon"
   },
   "onboarding": {
     "subtitle": "Aby rozpocząć, wybierz model transkrypcji",
@@ -349,7 +350,17 @@
         "placeholder": "Dodaj słowo",
         "add": "Dodaj",
         "remove": "Usuń {{word}}",
-        "duplicate": "\"{{word}}\" już istnieje"
+        "duplicate": "\"{{word}}\" już istnieje",
+        "bulkAdd": "Bulk add",
+        "bulkPlaceholder": "One entry per line (supports target|alias~~~blacklist)",
+        "bulkPreview": "{{added}} new, {{duplicates}} duplicate, {{invalid}} skipped",
+        "bulkConfirm": "Add these",
+        "bulkCancel": "Cancel",
+        "bulkDone": "Added {{count}} entries",
+        "export": "Export",
+        "count": "{{count}} total",
+        "searchPlaceholder": "Search entries…",
+        "showMore": "Show more ({{count}} left)"
       },
       "voiceActivityDetection": {
         "title": "Wykrywanie aktywności głosowej",
@@ -382,16 +393,21 @@
       },
       "lexiconImport": {
         "title": "Import THUOCL Lexicon",
-        "description": "Import category word lists from the Tsinghua THUOCL lexicon. Words are filtered (pure Chinese characters, 3-50 chars) and the top 5000 by word frequency can be appended to your custom words.",
+        "description": "Import category word lists from the Tsinghua THUOCL lexicon as managed sources (pure Chinese characters, 3-50 chars, top 5000 by word frequency). Imported words are kept separate from your custom words and can be updated or removed per source.",
         "fetch": "Fetch Word Lists",
         "fetching": "Downloading…",
-        "append": "Append to Custom Words",
+        "save": "Save as Lexicon Sources",
         "cancel": "Cancel",
         "selectHint": "Select at least one category",
-        "preview": "{{count}} words will be added",
+        "preview": "{{count}} words will be imported",
         "emptyResult": "No new words to add (all filtered out or already present)",
         "error": "Import failed: {{message}}",
-        "success": "Added {{count}} words",
+        "success": "Saved {{count}} words",
+        "saveError": "Save failed: {{message}}",
+        "removeError": "Remove failed: {{message}}",
+        "installed": "Installed sources",
+        "wordCount": "{{count}} words",
+        "removeSource": "Remove {{source}}",
         "categories": {
           "IT": "IT",
           "animal": "Animals",
@@ -404,7 +420,55 @@
           "lishimingren": "Historical Figures",
           "medical": "Medicine",
           "poem": "Poetry"
-        }
+        },
+        "fromFile": "Import from file…",
+        "copyError": "Copy details",
+        "copied": "Error copied to clipboard",
+        "removeConfirm": "Remove {{source}}?",
+        "removeConfirmYes": "Remove"
+      },
+      "recentCandidates": {
+        "title": "Recent Frequent Terms",
+        "description": "Candidate terms extracted locally from the last 30 days of history. These are suggestions only — nothing is activated automatically. Promote adds the term to your custom words; Ignore hides it for this session only.",
+        "refresh": "Refresh",
+        "loading": "Analyzing…",
+        "error": "Failed to analyze history: {{message}}",
+        "count": "{{count}} times",
+        "promote": "Promote",
+        "ignore": "Ignore",
+        "promoted": "\"{{term}}\" added to custom words",
+        "exists": "\"{{term}}\" is already in your word list",
+        "score": "score {{docs}}",
+        "scoreHint": "Score: number of recordings containing this term (higher = stronger candidate).",
+        "copyError": "Copy error",
+        "copied": "Copied",
+        "ignoreAll": "Ignore all"
+      },
+      "learnedCandidates": {
+        "title": "Learned Corrections",
+        "description": "Correction pairs learned locally from your paste edits (wrong → corrected). Nothing is active yet: Adopt turns a pair into a custom-words hotword rule; Undo deletes it and blocks it from being learned again.",
+        "refresh": "Refresh",
+        "loading": "Loading…",
+        "count": "{{count}} times",
+        "adopt": "Adopt",
+        "undo": "Undo",
+        "adopted": "\"{{wrong}} → {{corrected}}\" added to custom words",
+        "exists": "\"{{wrong}} → {{corrected}}\" is already in your word list",
+        "undone": "Removed {{count}} learned pair(s)",
+        "error": "Failed to load learned corrections: {{message}}",
+        "copyError": "Copy error",
+        "copied": "Copied"
+      },
+      "llmCandidates": {
+        "title": "LLM Candidates",
+        "description": "Read-only preview of lexicon curation candidates (term with suggested variants). Shown only when the preview_lexicon_curation command is available; nothing is applied automatically.",
+        "refresh": "Refresh",
+        "loading": "Loading…",
+        "count": "{{count}} times",
+        "variants": "variants: {{aliases}}",
+        "error": "Failed to load LLM candidates: {{message}}",
+        "copyError": "Copy error",
+        "copied": "Copied"
       },
       "hotwordRules": {
         "title": "Chinese Hotword Rules",
@@ -420,17 +484,50 @@
       "hotwordDialect": {
         "label": "Dialect Confusion Matching",
         "description": "Allow n/l and f/h initial swapping (e.g. niu/liu). Enable for heavy accents; increases false-positive risk."
+      },
+      "inputLevelNormalization": {
+        "title": "Input level normalization",
+        "description": "Normalizes quiet and loud speech into the range the model decodes best. Applied before voice detection, with a noise-floor estimate and a -3 dBFS limiter."
+      },
+      "incrementalCommit": {
+        "title": "Incremental output",
+        "description": "Commit text while you are still speaking, instead of pasting everything when you stop. Streaming models use their committed prefix; batch models commit at pauses."
+      },
+      "decodeVocabularyBias": {
+        "title": "Decode-time word bias",
+        "description": "Pass hot words to the model while it decodes. Some models are over-influenced by this (e.g. Qwen3-ASR may emit unrelated hot words); turn it off to keep only pinyin post-correction."
+      },
+      "candidateList": {
+        "expand": "Expand",
+        "collapse": "Collapse",
+        "summary": "{{count}} candidates kept"
       }
     },
     "postProcessing": {
       "hotkey": {
         "title": "Skrót klawiszowy"
       },
+      "trigger": {
+        "title": "Trigger",
+        "alwaysNote": "Regular dictation is post-processed automatically.",
+        "mode": {
+          "title": "Trigger mode",
+          "description": "Choose when dictation results are post-processed.",
+          "always": "Post-process every dictation",
+          "separate": "Dedicated shortcut only"
+        }
+      },
       "api": {
         "title": "API",
         "provider": {
           "title": "Dostawca",
-          "description": "Wybierz dostawcę zgodnego z OpenAI lub Anthropic."
+          "description": "Wybierz dostawcę zgodnego z OpenAI lub Anthropic.",
+          "add": "Add Custom Provider",
+          "defaultLabel": "Custom {{number}}",
+          "delete": "Delete",
+          "deleteProvider": "Delete custom provider",
+          "limitReached": "Custom provider limit reached ({{count}}). Delete one before adding another.",
+          "unsaved": "This custom provider lives only in this session and disappears when the app restarts."
         },
         "apiFormat": {
           "title": "Format API",
@@ -461,6 +558,13 @@
           "placeholderWithOptions": "Wyszukaj lub wybierz model",
           "placeholderNoOptions": "Wpisz nazwę modelu",
           "refreshModels": "Odśwież modele"
+        }
+      },
+      "context": {
+        "title": "Context",
+        "toggle": {
+          "label": "Send Focused-App Context",
+          "description": "When a post-processing recording starts, the focused app's name and (on Windows, and on macOS where the system exposes it) up to 128 characters before the text cursor are captured once, before Voo shows its overlay, and sent to your configured LLM provider to help correct spelling and terminology. Window titles are never captured; nothing is collected when post-processing is off."
         }
       },
       "prompts": {
@@ -499,7 +603,20 @@
       "retranscribe": "Transkrybuj ponownie",
       "retranscribeError": "Nie udało się ponownie transkrybować. Spróbuj ponownie.",
       "transcribing": "Transkrybuję...",
-      "transcriptionFailed": "Transkrypcja nie powiodła się. Możesz transkrybować ponownie za pomocą ikony ponowienia."
+      "transcriptionFailed": "Transkrypcja nie powiodła się. Możesz transkrybować ponownie za pomocą ikony ponowienia.",
+      "rememberCorrection": {
+        "title": "Remember this correction",
+        "description": "Saves this correction as a custom-word hotword (\"correct | wrong\") so future transcriptions are auto-corrected.",
+        "correctLabel": "Correct text",
+        "correctPlaceholder": "What it should say",
+        "wrongLabel": "Misheard text (optional)",
+        "wrongPlaceholder": "What was transcribed (prefilled from selection)",
+        "save": "Save",
+        "cancel": "Cancel",
+        "saved": "Correction saved as a hotword.",
+        "duplicate": "This correction is already in your custom words.",
+        "error": "Failed to save correction: {{error}}"
+      }
     },
     "debug": {
       "title": "Debugowanie",
@@ -666,6 +783,73 @@
       "whatsNewUpdates": {
         "label": "Pokaż nowości",
         "description": "Pokazuj informacje o wydaniu po aktualizacjach Voo"
+      }
+    },
+    "lexicon": {
+      "groups": {
+        "words": "Custom Words & Hotword Rules",
+        "sources": "Lexicon Sources",
+        "candidates": "Candidates",
+        "curation": "AI Curation"
+      },
+      "curation": {
+        "label": "Scheduled AI lexicon curation",
+        "description": "Periodically curate frequent terms from your history into hotword candidates in the background. Requires a configured post-process provider; nothing is sent unless one is set up.",
+        "strategy": "Trigger: after 200 new history entries, or 7 days since the last run — checked after app start and after each transcription is saved.",
+        "throttle": "At most one curation run at a time and one LLM request per run; a failed request is not retried for 24 hours. Candidates are never activated automatically.",
+        "runNow": "Run now",
+        "running": "Checking…",
+        "count": "Current candidates: {{count}}",
+        "error": "Failed to load curation candidates: {{message}}"
+      },
+      "sources": {
+        "title": "Open-source lexicon sources",
+        "description": "Import curated open-source lexicons as per-source snapshots. Each source is previewed before anything is written; there is no bulk import.",
+        "groupProperNouns": "Proper nouns & terminology (recommended)",
+        "groupDomainHan": "Chinese domain words",
+        "groupFrequencyBaseline": "Frequency baseline (collapsed)",
+        "groupOther": "Other sources",
+        "thuoclHint": "THUOCL categorized lexicons keep their existing entry below.",
+        "recommended": "Recommended",
+        "notRecommended": "Not recommended for direct import",
+        "statusInstalled": "Installed · {{count}} words",
+        "statusNotInstalled": "Not installed",
+        "import": "Import",
+        "update": "Update",
+        "remove": "Remove",
+        "removing": "Removing…",
+        "installedTitle": "Installed sources",
+        "removeConfirm": "Remove {{source}}?",
+        "removeConfirmYes": "Confirm removal",
+        "cancel": "Cancel",
+        "removeError": "Failed to remove source: {{message}}",
+        "empty": "No sources available.",
+        "loadError": "Failed to load sources: {{message}}",
+        "loading": "Loading sources…",
+        "copyError": "Copy error",
+        "copied": "Copied",
+        "dialog": {
+          "titleImport": "Import {{source}}",
+          "titleUpdate": "Update {{source}}",
+          "version": "Version: {{version}}",
+          "loadingPreview": "Fetching and parsing the source…",
+          "previewError": "Preview failed: {{message}}",
+          "confirmError": "Import failed: {{message}}",
+          "success": "Saved {{count}} words",
+          "entries": "Entries after eligibility + scope filter: {{count}}",
+          "filtered": "Dropped by common-word filter: {{count}}",
+          "kept": "Words to import: {{count}}",
+          "samples": "First {{count}} samples",
+          "noWeight": "—",
+          "scope": "Scope",
+          "scope_all": "All",
+          "scope_latin_only": "Latin only",
+          "scope_han_only": "Chinese only",
+          "limit": "Limit",
+          "confirmImport": "Import {{count}} words",
+          "confirmUpdate": "Replace snapshot with {{count}} words",
+          "confirming": "Importing…"
+        }
       }
     }
   },

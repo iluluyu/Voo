@@ -16,7 +16,8 @@
     "postProcessing": "后处理",
     "history": "历史记录",
     "debug": "调试",
-    "about": "关于"
+    "about": "关于",
+    "lexicon": "词库"
   },
   "onboarding": {
     "subtitle": "请选择一个转录模型以开始使用",
@@ -349,20 +350,35 @@
         "placeholder": "添加词汇",
         "add": "添加",
         "remove": "删除 {{word}}",
-        "duplicate": "\"{{word}}\" 已存在"
+        "duplicate": "\"{{word}}\" 已存在",
+        "bulkAdd": "批量添加",
+        "bulkPlaceholder": "一行一条（支持 目标|别名~~~黑名单）",
+        "bulkPreview": "新增 {{added}} 条，重复 {{duplicates}} 条，跳过 {{invalid}} 条",
+        "bulkConfirm": "确认添加",
+        "bulkCancel": "取消",
+        "bulkDone": "已添加 {{count}} 条",
+        "export": "导出",
+        "count": "共 {{count}} 条",
+        "searchPlaceholder": "搜索词条…",
+        "showMore": "显示更多（剩余 {{count}}）"
       },
       "lexiconImport": {
         "title": "导入词库（THUOCL）",
-        "description": "从清华 THUOCL 开放词库导入分类词汇。导入时会过滤（纯汉字、3–50 字）并按词频取前 5000 个词，确认后追加到自定义词汇。",
+        "description": "从清华 THUOCL 开放词库导入分类词汇，作为可管理的词库来源（纯汉字、3–50 字、按词频取前 5000）。导入词与手工词分开保存，可按来源更新或移除。",
         "fetch": "获取词库",
         "fetching": "正在下载…",
-        "append": "追加到自定义词汇",
+        "save": "保存为词库来源",
         "cancel": "取消",
         "selectHint": "请先选择至少一个分类",
-        "preview": "将追加 {{count}} 个词",
+        "preview": "将导入 {{count}} 个词",
         "emptyResult": "没有可追加的新词（已过滤或全部重复）",
         "error": "导入失败：{{message}}",
-        "success": "已追加 {{count}} 个词",
+        "success": "已保存 {{count}} 个词",
+        "saveError": "保存失败：{{message}}",
+        "removeError": "移除失败：{{message}}",
+        "installed": "已安装来源",
+        "wordCount": "{{count}} 个词",
+        "removeSource": "移除 {{source}}",
         "categories": {
           "IT": "信息技术",
           "animal": "动物",
@@ -375,7 +391,55 @@
           "lishimingren": "历史名人",
           "medical": "医学",
           "poem": "诗词"
-        }
+        },
+        "fromFile": "从本地文件导入…",
+        "copyError": "复制错误详情",
+        "copied": "错误详情已复制",
+        "removeConfirm": "确认移除「{{source}}」？",
+        "removeConfirmYes": "确认移除"
+      },
+      "recentCandidates": {
+        "title": "最近常出现",
+        "description": "从最近 30 天历史中本地提取的高频候选词。仅作建议，不会自动激活。「提升为热词」把词加入自定义热词；「忽略」只在本次会话内隐藏，不写盘。",
+        "refresh": "刷新",
+        "loading": "正在分析…",
+        "error": "分析历史失败：{{message}}",
+        "count": "{{count}} 次",
+        "promote": "提升为热词",
+        "ignore": "忽略",
+        "promoted": "已把「{{term}}」加入自定义热词",
+        "exists": "「{{term}}」已在热词表中",
+        "score": "score {{docs}}",
+        "scoreHint": "score = 出现过该词的转写条数（越多越可信）。",
+        "copyError": "复制错误",
+        "copied": "已复制",
+        "ignoreAll": "全部忽略"
+      },
+      "learnedCandidates": {
+        "title": "已学习的修正",
+        "description": "从粘贴修改中本地学习到的词对（原词 → 新词），均未激活。采纳会把词对写入自定义热词；撤销会删除该候选并阻止再次学习。",
+        "refresh": "刷新",
+        "loading": "加载中…",
+        "count": "{{count}} 次",
+        "adopt": "采纳",
+        "undo": "撤销",
+        "adopted": "已把「{{wrong}} → {{corrected}}」写入自定义热词",
+        "exists": "「{{wrong}} → {{corrected}}」已在词表中",
+        "undone": "已撤销 {{count}} 条学习记录",
+        "error": "加载学习记录失败：{{message}}",
+        "copyError": "复制错误",
+        "copied": "已复制"
+      },
+      "llmCandidates": {
+        "title": "LLM 候选",
+        "description": "词库整理候选的只读预览（词条及其建议变体）。仅在 preview_lexicon_curation 命令可用时显示，不会自动生效。",
+        "refresh": "刷新",
+        "loading": "加载中…",
+        "count": "{{count}} 次",
+        "variants": "变体：{{aliases}}",
+        "error": "加载 LLM 候选失败：{{message}}",
+        "copyError": "复制错误",
+        "copied": "已复制"
       },
       "hotwordRules": {
         "title": "中文热词规则",
@@ -420,17 +484,50 @@
           "simplified": "简体",
           "traditional": "繁体"
         }
+      },
+      "inputLevelNormalization": {
+        "title": "输入电平调理",
+        "description": "把轻声和大声都收进模型最容易识别的电平区间。作用在语音检测之前，带底噪估计和 -3 dBFS 限幅。"
+      },
+      "incrementalCommit": {
+        "title": "增量上屏",
+        "description": "录音过程中就把已确定的文字上屏，而不是停止后一次性粘贴。流式模型用引擎的已确认前缀，批处理模型在停顿处提交。"
+      },
+      "decodeVocabularyBias": {
+        "title": "解码期词表偏置",
+        "description": "把热词交给模型在解码阶段参考。部分模型会被带偏（如 Qwen3-ASR 会输出无关热词），关闭后只保留拼音后处理纠错。"
+      },
+      "candidateList": {
+        "expand": "展开",
+        "collapse": "折叠",
+        "summary": "保留 {{count}} 个候选"
       }
     },
     "postProcessing": {
       "hotkey": {
         "title": "快捷键"
       },
+      "trigger": {
+        "title": "触发",
+        "alwaysNote": "普通听写会自动后处理",
+        "mode": {
+          "title": "触发方式",
+          "description": "决定何时对听写结果进行后处理。",
+          "always": "每次听写都后处理",
+          "separate": "仅专用快捷键"
+        }
+      },
       "api": {
         "title": "API",
         "provider": {
           "title": "提供商",
-          "description": "选择一个兼容 OpenAI 或 Anthropic 的提供商。"
+          "description": "选择一个兼容 OpenAI 或 Anthropic 的提供商。",
+          "add": "添加自定义供应商",
+          "defaultLabel": "自定义 {{number}}",
+          "delete": "删除",
+          "deleteProvider": "删除自定义供应商",
+          "limitReached": "自定义供应商已达上限（{{count}} 个）。请先删除再添加。",
+          "unsaved": "该自定义供应商仅存在于本次会话，应用重启后会消失。"
         },
         "apiFormat": {
           "title": "API 格式",
@@ -461,6 +558,13 @@
           "placeholderWithOptions": "搜索或选择模型",
           "placeholderNoOptions": "输入模型名称",
           "refreshModels": "刷新模型"
+        }
+      },
+      "context": {
+        "title": "上下文",
+        "toggle": {
+          "label": "发送焦点应用上下文",
+          "description": "后处理录音开始时（Voo 显示悬浮窗之前），会一次性采集当前焦点应用的名称，以及（Windows 与可获取到的 macOS 上）光标前最多 128 个字符的文本，并把它们发送给你配置的 LLM 服务商，用于纠正写法与术语。绝不采集窗口标题；后处理关闭时不采集任何内容。"
         }
       },
       "prompts": {
@@ -499,7 +603,20 @@
       "retranscribe": "重新转录",
       "retranscribeError": "重新转录失败。请重试。",
       "transcribing": "转录中...",
-      "transcriptionFailed": "转录失败。您可以使用重试图标重新转录。"
+      "transcriptionFailed": "转录失败。您可以使用重试图标重新转录。",
+      "rememberCorrection": {
+        "title": "记住这条修正",
+        "description": "把这次纠错保存为自定义热词（“正确 | 错误”），以后的转写会自动修正。",
+        "correctLabel": "正确写法",
+        "correctPlaceholder": "应该输出的文字",
+        "wrongLabel": "错误写法（可选）",
+        "wrongPlaceholder": "被听错的文字（选中后自动填入）",
+        "save": "保存",
+        "cancel": "取消",
+        "saved": "已保存为热词。",
+        "duplicate": "该修正已存在。",
+        "error": "保存失败：{{error}}"
+      }
     },
     "debug": {
       "title": "调试",
@@ -666,6 +783,73 @@
       "whatsNewUpdates": {
         "label": "显示新功能",
         "description": "Voo 更新后显示发行说明"
+      }
+    },
+    "lexicon": {
+      "groups": {
+        "words": "自定义词汇与热词规则",
+        "sources": "词库来源",
+        "candidates": "候选词",
+        "curation": "AI 整理"
+      },
+      "curation": {
+        "label": "AI 定时整理词库",
+        "description": "后台定期把历史中的高频词整理为热词候选。需要已配置后处理服务商；未配置时不会发起任何请求。",
+        "strategy": "触发条件：历史每新增 200 条，或距上次整理 ≥ 7 天；在应用启动后与每次转写保存后检查。",
+        "throttle": "同一时刻至多一个整理任务，每次至多一次 LLM 请求；请求失败后 24 小时内不再重试。候选词不会自动生效。",
+        "runNow": "立即整理",
+        "running": "检查中…",
+        "count": "当前候选：{{count}} 条",
+        "error": "获取整理候选失败：{{message}}"
+      },
+      "sources": {
+        "title": "开源词库来源",
+        "description": "从精选开源词库按来源导入词快照。每个来源都先预览确认再写入；不提供“全部导入”。",
+        "groupProperNouns": "专名 / 术语（推荐）",
+        "groupDomainHan": "中文领域词",
+        "groupFrequencyBaseline": "词频基准（默认折叠）",
+        "groupOther": "其他来源",
+        "thuoclHint": "THUOCL 分类词库仍保留下方原有入口。",
+        "recommended": "推荐",
+        "notRecommended": "不建议直接导入",
+        "statusInstalled": "已安装 · {{count}} 词",
+        "statusNotInstalled": "未安装",
+        "import": "导入",
+        "update": "更新",
+        "remove": "移除",
+        "removing": "正在移除…",
+        "installedTitle": "已安装来源",
+        "removeConfirm": "确认移除 {{source}}？",
+        "removeConfirmYes": "确认移除",
+        "cancel": "取消",
+        "removeError": "移除失败：{{message}}",
+        "empty": "暂无可用来源。",
+        "loadError": "加载来源列表失败：{{message}}",
+        "loading": "正在加载来源…",
+        "copyError": "复制错误详情",
+        "copied": "已复制",
+        "dialog": {
+          "titleImport": "导入 {{source}}",
+          "titleUpdate": "更新 {{source}}",
+          "version": "版本：{{version}}",
+          "loadingPreview": "正在拉取并解析词库…",
+          "previewError": "预览失败：{{message}}",
+          "confirmError": "导入失败：{{message}}",
+          "success": "已保存 {{count}} 个词",
+          "entries": "资格 + 范围筛选后条目：{{count}}",
+          "filtered": "常用词过滤丢弃：{{count}}",
+          "kept": "将导入词数：{{count}}",
+          "samples": "前 {{count}} 条样例",
+          "noWeight": "—",
+          "scope": "范围",
+          "scope_all": "全部",
+          "scope_latin_only": "仅拉丁",
+          "scope_han_only": "仅中文",
+          "limit": "上限",
+          "confirmImport": "导入 {{count}} 词",
+          "confirmUpdate": "以 {{count}} 词替换快照",
+          "confirming": "正在导入…"
+        }
       }
     }
   },

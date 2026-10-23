@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { Check, Copy, FolderOpen, RotateCcw, Star, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  FolderOpen,
+  RotateCcw,
+  SpellCheck,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -14,6 +22,7 @@ import { useOsType } from "@/hooks/useOsType";
 import { formatDateTime } from "@/utils/dateFormat";
 import { AudioPlayer, AudioPlayerGroup } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
+import { Dialog } from "../../ui/Dialog";
 import { copyToClipboard } from "./clipboard";
 
 const IconButton: React.FC<{
@@ -21,10 +30,12 @@ const IconButton: React.FC<{
   title: string;
   disabled?: boolean;
   active?: boolean;
+  onMouseDown?: (event: React.MouseEvent) => void;
   children: React.ReactNode;
-}> = ({ onClick, title, disabled, active, children }) => (
+}> = ({ onClick, title, disabled, active, onMouseDown, children }) => (
   <button
     onClick={onClick}
+    onMouseDown={onMouseDown}
     disabled={disabled}
     className={`p-1.5 rounded-md flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:text-text/20 ${
       active
@@ -304,6 +315,144 @@ interface HistoryEntryProps {
   retryTranscription: (id: number) => Promise<void>;
 }
 
+/** 与 ui/Input（default 变体）同款的输入框样式；这里用原生 input 以便
+ * 把 ref 交给 Dialog 的 initialFocusRef（Input 不转发 ref）。 */
+const CORRECTION_INPUT_CLASS =
+  "w-full px-3 py-2 text-sm font-semibold bg-mid-gray/10 border border-mid-gray/80 rounded-md text-start transition-all duration-150 hover:bg-logo-primary/10 hover:border-logo-primary focus:outline-none focus:bg-logo-primary/20 focus:border-logo-primary disabled:opacity-60 disabled:cursor-not-allowed disabled:bg-mid-gray/10 disabled:border-mid-gray/40";
+
+/** 「记住这条修正」弹窗：把一次纠错沉淀成自定义热词（`正确 | 错误`）。
+ * 保存仅在用户点击保存/回车确认后发生（后端命令显式写入）；
+ * 已存在相同条目时后端返回 false → 提示"已存在"；失败原样报错。 */
+const RememberCorrectionDialog: React.FC<{
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  prefilledWrong: string;
+}> = ({ open, onOpenChange, prefilledWrong }) => {
+  const { t } = useTranslation();
+  const [correct, setCorrect] = useState("");
+  const [wrong, setWrong] = useState("");
+  const [saving, setSaving] = useState(false);
+  const correctInputRef = useRef<HTMLInputElement>(null);
+
+  // 每次打开时重置表单，并把条目里选中的文本预填到"错误写法"
+  useEffect(() => {
+    if (open) {
+      setCorrect("");
+      setWrong(prefilledWrong);
+      setSaving(false);
+    }
+  }, [open, prefilledWrong]);
+
+  const correctTrimmed = correct.trim();
+  const canSave =
+    correctTrimmed.length >= 2 && correctTrimmed.length <= 50 && !saving;
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    try {
+      const result = await commands.suggestCorrectionToHotword(
+        correctTrimmed,
+        wrong.trim() ? wrong : null,
+      );
+      if (result.status === "ok") {
+        if (result.data) {
+          toast.success(t("settings.history.rememberCorrection.saved"));
+        } else {
+          toast.info(t("settings.history.rememberCorrection.duplicate"));
+        }
+        onOpenChange(false);
+      } else {
+        toast.error(
+          t("settings.history.rememberCorrection.error", {
+            error: String(result.error),
+          }),
+        );
+      }
+    } catch (error) {
+      toast.error(
+        t("settings.history.rememberCorrection.error", {
+          error: String(error),
+        }),
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void handleSave();
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!saving) onOpenChange(next);
+      }}
+      title={t("settings.history.rememberCorrection.title")}
+      description={t("settings.history.rememberCorrection.description")}
+      closeLabel={t("common.close")}
+      initialFocusRef={correctInputRef}
+      footer={
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onOpenChange(false)}
+            disabled={saving}
+          >
+            {t("settings.history.rememberCorrection.cancel")}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => void handleSave()}
+            disabled={!canSave}
+          >
+            {t("settings.history.rememberCorrection.save")}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <label className="flex flex-col gap-1.5 text-sm font-medium text-text/90">
+          {t("settings.history.rememberCorrection.correctLabel")}
+          <input
+            ref={correctInputRef}
+            type="text"
+            className={CORRECTION_INPUT_CLASS}
+            value={correct}
+            onChange={(event) => setCorrect(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={t(
+              "settings.history.rememberCorrection.correctPlaceholder",
+            )}
+            disabled={saving}
+          />
+        </label>
+        <label className="flex flex-col gap-1.5 text-sm font-medium text-text/90">
+          {t("settings.history.rememberCorrection.wrongLabel")}
+          <input
+            type="text"
+            className={CORRECTION_INPUT_CLASS}
+            value={wrong}
+            onChange={(event) => setWrong(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={t(
+              "settings.history.rememberCorrection.wrongPlaceholder",
+            )}
+            disabled={saving}
+          />
+        </label>
+      </div>
+    </Dialog>
+  );
+};
+
 const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   entry,
   onToggleSaved,
@@ -315,6 +464,9 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   const { t, i18n } = useTranslation();
   const [showCopied, setShowCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const [prefilledWrong, setPrefilledWrong] = useState("");
+  const textRef = useRef<HTMLParagraphElement>(null);
 
   const hasTranscription = entry.transcription_text.trim().length > 0;
 
@@ -359,6 +511,20 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     }
   };
 
+  // 点击按钮的 mousedown 默认行为会清除文本选区；在它发生之前抓取
+  // 本条转写文本内的选中文本，用于预填"错误写法"。preventDefault 同时
+  // 保住选区，用户保存后仍可对照。
+  const handleCorrectionMouseDown = (event: React.MouseEvent) => {
+    event.preventDefault();
+    const selection = window.getSelection();
+    const anchor = selection?.anchorNode ?? null;
+    if (selection && anchor && textRef.current?.contains(anchor)) {
+      setPrefilledWrong(selection.toString().trim().slice(0, 100));
+    } else {
+      setPrefilledWrong("");
+    }
+  };
+
   const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
 
   return (
@@ -376,6 +542,14 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             ) : (
               <Copy width={16} height={16} />
             )}
+          </IconButton>
+          <IconButton
+            onClick={() => setCorrectionOpen(true)}
+            onMouseDown={handleCorrectionMouseDown}
+            disabled={!hasTranscription || retrying}
+            title={t("settings.history.rememberCorrection.title")}
+          >
+            <SpellCheck width={16} height={16} />
           </IconButton>
           <IconButton
             onClick={onToggleSaved}
@@ -419,6 +593,7 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
       </div>
 
       <p
+        ref={textRef}
         className={`italic text-sm pb-2 ${
           retrying
             ? ""
@@ -448,6 +623,12 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
       </p>
 
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
+
+      <RememberCorrectionDialog
+        open={correctionOpen}
+        onOpenChange={setCorrectionOpen}
+        prefilledWrong={prefilledWrong}
+      />
     </div>
   );
 };

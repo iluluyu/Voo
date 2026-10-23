@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { RefreshCcw } from "lucide-react";
-import { commands, type PostProcessApiFormat } from "@/bindings";
+import { Plus, RefreshCcw, Trash2 } from "lucide-react";
+import { commands, type PostProcessApiFormat, type PostProcessMode } from "@/bindings";
 
 import { Alert } from "../../ui/Alert";
 import {
@@ -19,12 +19,92 @@ import { BaseUrlField } from "../PostProcessingSettingsApi/BaseUrlField";
 import { ApiKeyField } from "../PostProcessingSettingsApi/ApiKeyField";
 import { ModelSelect } from "../PostProcessingSettingsApi/ModelSelect";
 import { usePostProcessProviderState } from "../PostProcessingSettingsApi/usePostProcessProviderState";
-import { ShortcutInput } from "../ShortcutInput";
 import { useSettings } from "../../../hooks/useSettings";
+import { PostProcessingContextToggle } from "../PostProcessingContextToggle";
+import { PostProcessingToggle } from "../PostProcessingToggle";
+import { ShortcutInput } from "../ShortcutInput";
+
+const PostProcessingSettingsTriggerComponent: React.FC = () => {
+  const { t } = useTranslation();
+  const { getSetting, updateSetting, isUpdating } = useSettings();
+
+  const mode = getSetting("post_process_mode") ?? "always";
+  const isModeUpdating = isUpdating("post_process_mode");
+
+  const handleModeChange = (value: PostProcessMode) => {
+    updateSetting("post_process_mode", value);
+  };
+
+  return (
+    <>
+      <PostProcessingToggle descriptionMode="tooltip" grouped={true} />
+
+      <SettingContainer
+        title={t("settings.postProcessing.trigger.mode.title")}
+        description={t("settings.postProcessing.trigger.mode.description")}
+        descriptionMode="tooltip"
+        layout="stacked"
+        grouped={true}
+      >
+        <div className="flex flex-col gap-2">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              name="post_process_mode"
+              checked={mode === "always"}
+              onChange={() => handleModeChange("always")}
+              disabled={isModeUpdating}
+            />
+            {t("settings.postProcessing.trigger.mode.always")}
+          </label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              name="post_process_mode"
+              checked={mode === "separate"}
+              onChange={() => handleModeChange("separate")}
+              disabled={isModeUpdating}
+            />
+            {t("settings.postProcessing.trigger.mode.separate")}
+          </label>
+          {mode === "always" && (
+            <p className="text-xs text-mid-gray/70">
+              {t("settings.postProcessing.trigger.alwaysNote")}
+            </p>
+          )}
+        </div>
+      </SettingContainer>
+
+      {mode === "separate" && (
+        <ShortcutInput
+          shortcutId="transcribe_with_post_process"
+          descriptionMode="tooltip"
+          grouped={true}
+        />
+      )}
+    </>
+  );
+};
+
+const PostProcessingSettingsTrigger = React.memo(
+  PostProcessingSettingsTriggerComponent,
+);
+PostProcessingSettingsTrigger.displayName = "PostProcessingSettingsTrigger";
 
 const PostProcessingSettingsApiComponent: React.FC = () => {
   const { t } = useTranslation();
   const state = usePostProcessProviderState();
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleDeleteProvider = async () => {
+    if (isDeleting) return;
+    setIsDeleting(true);
+    try {
+      await state.handleDeleteProvider(state.selectedProviderId);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   return (
     <>
@@ -35,12 +115,44 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         layout="horizontal"
         grouped={true}
       >
-        <div className="flex items-center gap-2">
-          <ProviderSelect
-            options={state.providerOptions}
-            value={state.selectedProviderId}
-            onChange={state.handleProviderSelect}
-          />
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <ProviderSelect
+              options={state.providerOptions}
+              value={state.selectedProviderId}
+              onChange={state.handleProviderSelect}
+            />
+            <Button
+              onClick={state.handleAddProvider}
+              variant="primary"
+              size="md"
+              className="shrink-0"
+            >
+              <span className="flex items-center gap-1.5">
+                <Plus className="h-4 w-4" />
+                {t("settings.postProcessing.api.provider.add")}
+              </span>
+            </Button>
+            {state.isDeletableProvider && (
+              <Button
+                onClick={() => void handleDeleteProvider()}
+                variant="secondary"
+                size="md"
+                disabled={isDeleting}
+                className="shrink-0"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Trash2 className="h-4 w-4" />
+                  {t("settings.postProcessing.api.provider.delete")}
+                </span>
+              </Button>
+            )}
+          </div>
+          {!state.isAppleProvider && !state.isSelectedProviderPersisted && (
+            <p className="text-xs text-mid-gray/70">
+              {t("settings.postProcessing.api.provider.unsaved")}
+            </p>
+          )}
         </div>
       </SettingContainer>
 
@@ -52,7 +164,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         ) : null
       ) : (
         <>
-          {state.isCustomProvider && (
+          {state.isUserCustomProvider && (
             <SettingContainer
               title={t("settings.postProcessing.api.apiFormat.title")}
               description={t(
@@ -86,31 +198,29 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
             </SettingContainer>
           )}
 
-          {state.selectedProvider?.id === "custom" && (
-            <SettingContainer
-              title={t("settings.postProcessing.api.baseUrl.title")}
-              description={t("settings.postProcessing.api.baseUrl.description")}
-              descriptionMode="tooltip"
-              layout="horizontal"
-              grouped={true}
-            >
-              <div className="flex items-center gap-2">
-                <BaseUrlField
-                  value={state.baseUrl}
-                  onBlur={state.handleBaseUrlChange}
-                  placeholder={
-                    state.apiFormat === "anthropic"
-                      ? t(
-                          "settings.postProcessing.api.baseUrl.placeholderAnthropic",
-                        )
-                      : t("settings.postProcessing.api.baseUrl.placeholder")
-                  }
-                  disabled={state.isBaseUrlUpdating}
-                  className="min-w-[380px]"
-                />
-              </div>
-            </SettingContainer>
-          )}
+          <SettingContainer
+            title={t("settings.postProcessing.api.baseUrl.title")}
+            description={t("settings.postProcessing.api.baseUrl.description")}
+            descriptionMode="tooltip"
+            layout="horizontal"
+            grouped={true}
+          >
+            <div className="flex items-center gap-2">
+              <BaseUrlField
+                value={state.baseUrl}
+                onBlur={state.handleBaseUrlChange}
+                placeholder={
+                  state.apiFormat === "anthropic"
+                    ? t(
+                        "settings.postProcessing.api.baseUrl.placeholderAnthropic",
+                      )
+                    : t("settings.postProcessing.api.baseUrl.placeholder")
+                }
+                disabled={state.isBaseUrlUpdating || !state.allowBaseUrlEdit}
+                className="min-w-[380px]"
+              />
+            </div>
+          </SettingContainer>
 
           <SettingContainer
             title={t("settings.postProcessing.api.apiKey.title")}
@@ -138,7 +248,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         <SettingContainer
           title={t("settings.postProcessing.api.model.title")}
           description={
-            state.isCustomProvider
+            state.isUserCustomProvider
               ? t("settings.postProcessing.api.model.descriptionCustom")
               : t("settings.postProcessing.api.model.descriptionDefault")
           }
@@ -467,16 +577,16 @@ export const PostProcessingSettings: React.FC = () => {
 
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
-      <SettingsGroup title={t("settings.postProcessing.hotkey.title")}>
-        <ShortcutInput
-          shortcutId="transcribe_with_post_process"
-          descriptionMode="tooltip"
-          grouped={true}
-        />
+      <SettingsGroup title={t("settings.postProcessing.trigger.title")}>
+        <PostProcessingSettingsTrigger />
       </SettingsGroup>
 
       <SettingsGroup title={t("settings.postProcessing.api.title")}>
         <PostProcessingSettingsApi />
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.postProcessing.context.title")}>
+        <PostProcessingContextToggle />
       </SettingsGroup>
 
       <SettingsGroup title={t("settings.postProcessing.prompts.title")}>

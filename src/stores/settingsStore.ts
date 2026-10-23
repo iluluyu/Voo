@@ -5,6 +5,7 @@ import type {
   AppSettings as Settings,
   AudioDevice,
   PostProcessApiFormat,
+  PostProcessMode,
   ChineseScript,
   TranscribeAcceleratorSetting,
   ShortcutActivation,
@@ -166,6 +167,10 @@ const settingUpdaters: {
   history_limit: (value) => commands.updateHistoryLimit(value as number),
   post_process_enabled: (value) =>
     commands.changePostProcessEnabledSetting(value as boolean),
+  post_process_mode: (value) =>
+    commands.changePostProcessModeSetting(value as PostProcessMode),
+  post_process_context_enabled: (value) =>
+    commands.changePostProcessContextEnabledSetting(value as boolean),
   post_process_selected_prompt_id: (value) =>
     commands.setPostProcessSelectedPrompt(value as string),
   mute_while_recording: (value) =>
@@ -181,6 +186,12 @@ const settingUpdaters: {
     commands.changeLazyStreamCloseSetting(value as boolean),
   overlay_style: (value) => commands.changeOverlayStyleSetting(value as string),
   vad_enabled: (value) => commands.changeVadEnabledSetting(value as boolean),
+  input_level_normalization: (value) =>
+    commands.changeInputLevelNormalizationSetting(value as boolean),
+  decode_vocabulary_bias: (value) =>
+    commands.changeDecodeVocabularyBiasSetting(value as boolean),
+  incremental_commit: (value) =>
+    commands.changeIncrementalCommitSetting(value as boolean),
   long_form_chunking: (value) =>
     commands.changeLongFormChunkingSetting(value as boolean),
   vad_backend: async (value) => {
