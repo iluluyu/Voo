@@ -3602,6 +3602,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nnnoiseless"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23d377ce2fb579ed5c14cfa0d39e70849030fdf673d6d1a764cadb2dfbb02a50"
+dependencies = [
+ "once_cell",
+ "rustfft",
+]
+
+[[package]]
 name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7507,7 +7517,7 @@ dependencies = [
 
 [[package]]
 name = "voo"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7527,6 +7537,7 @@ dependencies = [
  "libc",
  "log",
  "natural",
+ "nnnoiseless",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

@@ -6,10 +6,11 @@
 //!
 //! 用法：
 //!   cargo run --example lexicon_bench
+use std::sync::Arc;
 use std::time::Instant;
 use voo_app_lib::audio_toolkit::chinese_hotwords::{
-    apply_pinyin_hotwords, build_hotword_index, ConfusionOptions, DEFAULT_MIN_HAN,
-    DEFAULT_THRESHOLD,
+    apply_chinese_hotwords_indexed, apply_pinyin_hotwords, build_hotword_index, ConfusionOptions,
+    HotwordCache, DEFAULT_MIN_HAN, DEFAULT_THRESHOLD,
 };
 
 /// 基准词表规模（模拟 11 分类 × 5000 词全额导入）。
@@ -179,6 +180,42 @@ fn main() {
     }
     let match_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+    // 3) 单槽缓存：首次编译 vs 命中（转写后处理每次调用都走这条路）
+    let cache = HotwordCache::new();
+    let t2 = Instant::now();
+    let first = cache.get_or_build(&words, "", DEFAULT_MIN_HAN);
+    let cache_build_ms = t2.elapsed().as_secs_f64() * 1000.0;
+    let t3 = Instant::now();
+    let second = cache.get_or_build(&words, "", DEFAULT_MIN_HAN);
+    let cache_hit_ms = t3.elapsed().as_secs_f64() * 1000.0;
+    assert!(Arc::ptr_eq(&first, &second), "命中必须复用同一 Arc");
+
+    // 4) 缓存检索层（解码期真实路径）：HotwordConfig 预构建的倒排
+    //    检索层随编译缓存复用，转写期零重建
+    let t4 = Instant::now();
+    let mut total_hits_indexed = 0usize;
+    for s in &sentences {
+        let (_, hits) = apply_chinese_hotwords_indexed(s, &first, DEFAULT_THRESHOLD, &opts);
+        total_hits_indexed += hits.len();
+    }
+    let indexed_ms = t4.elapsed().as_secs_f64() * 1000.0;
+
+    // 5) 差分自检：现建检索层与缓存检索层两条路径输出必须完全一致
+    for s in &sentences {
+        let a = apply_pinyin_hotwords(s, &index, DEFAULT_THRESHOLD, &opts);
+        let b = apply_chinese_hotwords_indexed(s, &first, DEFAULT_THRESHOLD, &opts);
+        assert_eq!(a.0, b.0, "检索层差分失败：{s}");
+        assert_eq!(a.1.len(), b.1.len(), "检索层命中数差分失败：{s}");
+        for (x, y) in a.1.iter().zip(b.1.iter()) {
+            assert_eq!(
+                (x.start, x.end, &x.matched, &x.replacement),
+                (y.start, y.end, &y.matched, &y.replacement),
+                "检索层命中差分失败：{s}"
+            );
+        }
+    }
+    assert_eq!(total_hits, total_hits_indexed, "两路命中总数不一致");
+
     println!("=== 词库导入基准（THUOCL 规模模拟）===");
     println!("输入词条:      {TARGET_WORDS} 条（可重复词表）");
     println!(
@@ -188,8 +225,14 @@ fn main() {
     println!("构建耗时:      {build_ms:.1} ms");
     println!("句子:          {SENTENCES} 条 × {SENTENCE_CHARS} 字");
     println!(
-        "匹配总耗时:    {match_ms:.1} ms（均 {:.3} ms/句）",
+        "匹配总耗时:    {match_ms:.1} ms（均 {:.3} ms/句，含每次现建检索层）",
         match_ms / SENTENCES as f64
     );
+    println!(
+        "缓存检索层匹配: {indexed_ms:.1} ms（均 {:.3} ms/句，解码期路径，零重建）",
+        indexed_ms / SENTENCES as f64
+    );
     println!("命中总数:      {total_hits}（句子有变化: {changed}/{SENTENCES}）");
+    println!("缓存首次编译:  {cache_build_ms:.1} ms");
+    println!("缓存命中:      {cache_hit_ms:.3} ms（同一 Arc 复用）");
 }

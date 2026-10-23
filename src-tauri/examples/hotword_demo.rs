@@ -19,8 +19,8 @@ fn main() {
         .split_whitespace()
         .map(|s| s.to_string())
         .collect();
-    let rules_text =
-        std::env::var("RULES").unwrap_or_else(|_| "四([个只])=>四条$1\n中州韵=中州韵输入法".to_string());
+    let rules_text = std::env::var("RULES")
+        .unwrap_or_else(|_| "四([个只])=>四条$1\n中州韵=中州韵输入法".to_string());
 
     let index = build_hotword_index(&hotwords, DEFAULT_MIN_HAN);
     let (rules, rule_errors) = parse_hotword_rules(&rules_text);
@@ -40,10 +40,12 @@ fn main() {
     println!("{}", "-".repeat(60));
 
     let process = |text: &str| {
-        let (final_text, hits) =
-            apply_chinese_hotwords(text, &index, &rules, threshold, &opts);
+        let (final_text, hits) = apply_chinese_hotwords(text, &index, &rules, threshold, &opts);
         for h in &hits {
-            println!("  [拼音] {} → {}  (相似度 {:.2})", h.matched, h.replacement, h.score);
+            println!(
+                "  [拼音] {} → {}  (相似度 {:.2})",
+                h.matched, h.replacement, h.score
+            );
         }
         if final_text != text {
             println!("  [结果] {text}\n       → {final_text}");
