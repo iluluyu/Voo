@@ -379,6 +379,21 @@
           "simplified": "Basitleştirilmiş",
           "traditional": "Geleneksel"
         }
+      },
+      "hotwordRules": {
+        "title": "Chinese Hotword Rules",
+        "description": "One rule per line: `pattern=replacement` as literal, `pattern=>replacement` as regex. Applied after pinyin hotwords. Lines starting with # are comments.",
+        "placeholder": "homophone=hotword\nfour([ pieces])=>four $1",
+        "hint": "Saves on Ctrl+Enter or blur",
+        "save": "Save"
+      },
+      "hotwordThreshold": {
+        "title": "Pinyin Hotword Threshold",
+        "description": "Similarity threshold (0.5–1.0) for Chinese pinyin hotword matching. Higher is more conservative: the default 0.85 only corrects homophones and single near-sound confusions."
+      },
+      "hotwordDialect": {
+        "label": "Dialect Confusion Matching",
+        "description": "Allow n/l and f/h initial swapping (e.g. niu/liu). Enable for heavy accents; increases false-positive risk."
       }
     },
     "postProcessing": {
