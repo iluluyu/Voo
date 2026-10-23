@@ -243,45 +243,102 @@ fn pair_cost(a: &[String], b: &[String], opts: &ConfusionOptions) -> (f64, usize
 // ---------------------------------------------------------------------------
 
 /// 一个热词条目
+/// 一行自定义词汇解析结果：`目标 | 别名1 ~~~ 黑名单1 | 黑名单2`
+#[derive(Debug, Clone, Default)]
+pub struct ParsedHotwordLine {
+    /// 替换目标（第一个词）
+    pub primary: String,
+    /// 触发别名（其余词，命中时同样替换为 primary）
+    pub aliases: Vec<String>,
+    /// 上下文黑名单（句中含有任一词时放弃替换，防同音歧义）
+    pub blacklist: Vec<String>,
+}
+
+/// 解析一行自定义词汇：`|` 分隔目标与别名，行尾 `~~~` 后为黑名单。
+/// 空段忽略；井号开头整行注释由调用方处理。
+pub fn parse_hotword_line(line: &str) -> ParsedHotwordLine {
+    let mut out = ParsedHotwordLine::default();
+    let (words_part, blacklist_part) = match line.split_once("~~~") {
+        Some((w, b)) => (w, Some(b)),
+        None => (line, None),
+    };
+    if let Some(b) = blacklist_part {
+        out.blacklist = b
+            .split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+    }
+    for (i, seg) in words_part.split('|').enumerate() {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if i == 0 || out.primary.is_empty() {
+            if out.primary.is_empty() {
+                out.primary = seg.to_owned();
+            }
+        } else {
+            out.aliases.push(seg.to_owned());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct HotwordEntry {
-    /// 替换目标（用户配置的热词原文）
+    /// 替换目标（用户配置的热词原文或别名行的第一个词）
     pub display: String,
-    /// 每字读音候选（与 display 的 chars 一一对应）
+    /// 每字读音候选（与触发文本的 chars 一一对应）
     pub syllables: Vec<CharSounds>,
     /// 汉字数量
     pub han_count: usize,
     /// 是否纯汉字（纯汉字热词只在纯汉字窗口匹配）
     pub all_han: bool,
+    /// 上下文黑名单（整句含任一词时放弃该命中）
+    pub blacklist: Vec<String>,
 }
 
 /// 从自定义词列表构建拼音热词索引。
-/// 收录条件：汉字数 >= `min_han`（默认 3）、每个字符都有读音。
+/// 每行支持 `目标 | 别名 ~~~ 黑名单`（见 parse_hotword_line）。
+/// 收录条件：汉字数 >= `min_han`（默认 3）、每个字符都有读音；
+/// 别名与目标共享收录门槛。
 pub fn build_hotword_index(words: &[String], min_han: usize) -> Vec<HotwordEntry> {
     let mut entries = Vec::with_capacity(words.len());
-    for word in words {
-        let han_count = word.chars().filter(|c| is_han(*c)).count();
-        if han_count < min_han || word.chars().count() > 50 {
+    for line in words {
+        let parsed = parse_hotword_line(line);
+        if parsed.primary.is_empty() {
             continue;
         }
-        let mut syllables = Vec::with_capacity(word.chars().count());
-        let mut ok = true;
-        for c in word.chars() {
-            match char_sounds(c) {
-                Some(s) => syllables.push(s),
-                None => {
-                    ok = false;
-                    break;
+        // 目标 + 别名各建一条，display 都指向 primary
+        let triggers = std::iter::once(parsed.primary.as_str())
+            .chain(parsed.aliases.iter().map(String::as_str));
+        for trigger in triggers {
+            let han_count = trigger.chars().filter(|c| is_han(*c)).count();
+            if han_count < min_han || trigger.chars().count() > 50 {
+                continue;
+            }
+            let mut syllables = Vec::with_capacity(trigger.chars().count());
+            let mut ok = true;
+            for c in trigger.chars() {
+                match char_sounds(c) {
+                    Some(s) => syllables.push(s),
+                    None => {
+                        ok = false;
+                        break;
+                    }
                 }
             }
-        }
-        if ok {
-            entries.push(HotwordEntry {
-                display: word.clone(),
-                all_han: syllables.iter().all(|s| s.is_han),
-                han_count,
-                syllables,
-            });
+            if ok {
+                entries.push(HotwordEntry {
+                    display: parsed.primary.clone(),
+                    all_han: syllables.iter().all(|s| s.is_han),
+                    han_count,
+                    syllables,
+                    blacklist: parsed.blacklist.clone(),
+                });
+            }
         }
     }
     entries
@@ -534,13 +591,22 @@ pub fn apply_pinyin_hotwords(
     let mut chosen: Vec<&Hit> = Vec::new();
     let mut occupied: Vec<(usize, usize)> = Vec::new();
     for hit in &hits {
-        if !occupied
+        if occupied
             .iter()
             .any(|&(os, oe)| hit.start < oe && os < hit.end)
         {
-            occupied.push((hit.start, hit.end));
-            chosen.push(hit);
+            continue;
         }
+        // 上下文黑名单：整句含任一黑词时放弃该命中（CapsWriter 同款语义，防同音歧义）
+        let blacklist = &index[hit.hotword_idx].blacklist;
+        if !blacklist.is_empty() {
+            let text_str: String = chars.iter().collect();
+            if blacklist.iter().any(|b| text_str.contains(b.as_str())) {
+                continue;
+            }
+        }
+        occupied.push((hit.start, hit.end));
+        chosen.push(hit);
     }
     chosen.sort_by_key(|h| h.start); // 从左到右重建
 
@@ -962,6 +1028,59 @@ mod tests {
             &OPTS,
         );
         assert_eq!(out2, "中州韵输入法很好用");
+    }
+
+    #[test]
+    fn test_parse_hotword_line_alias_and_blacklist() {
+        // 纯目标
+        let p = parse_hotword_line("中州韵输入法");
+        assert_eq!(p.primary, "中州韵输入法");
+        assert!(p.aliases.is_empty() && p.blacklist.is_empty());
+        // 目标 + 别名
+        let p = parse_hotword_line("Claude思维链 | 克劳德思维链 | cloud思维链");
+        assert_eq!(p.primary, "Claude思维链");
+        assert_eq!(p.aliases, vec!["克劳德思维链", "cloud思维链"]);
+        // 带黑名单
+        let p = parse_hotword_line("四喜丸子 ~~~ 世纪 | 世界");
+        assert_eq!(p.primary, "四喜丸子");
+        assert_eq!(p.blacklist, vec!["世纪", "世界"]);
+        // 全语法混合 + 多余空格
+        let p = parse_hotword_line(" 目标词 | 别名 ~~~ 黑1 | 黑2 ");
+        assert_eq!(p.primary, "目标词");
+        assert_eq!(p.aliases, vec!["别名"]);
+        assert_eq!(p.blacklist, vec!["黑1", "黑2"]);
+        // 空行/全空段
+        assert!(parse_hotword_line("").primary.is_empty());
+        assert!(parse_hotword_line("~~~ 黑名单").primary.is_empty());
+    }
+
+    #[test]
+    fn test_alias_triggers_replacement() {
+        // 别名命中 → 替换为第一个词（CapsWriter 同款语义）
+        let index = idx(&["中州韵输入法 | 中州韵"]);
+        // “中州韵”本身 3 字，作为别名被收录；说“中州韵” → 替换为“中州韵输入法”
+        let (out, log) = apply("中州韵很好用", &index);
+        assert_eq!(out, "中州韵输入法很好用");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].replacement, "中州韵输入法");
+        // 幂等：目标词已在文本中，自匹配不改写
+        let (out2, log2) = apply("中州韵输入法很好用", &index);
+        assert_eq!(out2, "中州韵输入法很好用");
+        assert!(log2.is_empty());
+    }
+
+    #[test]
+    fn test_blacklist_blocks_hit_in_context() {
+        // 上下文含黑名单词 → 放弃命中（同音歧义防护）
+        let index = idx(&["四喜丸子 ~~~ 世纪"]);
+        // “完子”与“丸子”同音，本应替换，但句中含黑词“世纪” → 放弃
+        let (out, log) = apply("二十一世纪吃四喜完子", &index);
+        assert_eq!(out, "二十一世纪吃四喜完子");
+        assert!(log.is_empty());
+        // 无黑词上下文 → 正常替换
+        let (out2, log2) = apply("今晚吃四喜完子", &index);
+        assert_eq!(out2, "今晚吃四喜丸子");
+        assert_eq!(log2.len(), 1);
     }
 
     #[test]

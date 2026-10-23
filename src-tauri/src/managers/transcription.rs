@@ -1416,9 +1416,15 @@ fn with_model_detected_language(
 /// Custom words for transcribe-cpp's `vocabulary` slot, in priority order.
 /// Empty for models without Feature::Vocabulary, which would warn on every run
 /// and rely on fuzzy correction instead.
+/// 每行只取替换目标（第一个词）：别名与黑名单是拼音后处理的语法，
+/// 注入引擎的 LLM 解码器上下文没有意义且浪费 token 预算。
 fn vocabulary_for_model(supports_vocabulary: bool, custom_words: &[String]) -> Vec<String> {
     if supports_vocabulary {
-        custom_words.to_vec()
+        custom_words
+            .iter()
+            .map(|line| chinese_hotwords::parse_hotword_line(line).primary)
+            .filter(|p| !p.is_empty())
+            .collect()
     } else {
         Vec::new()
     }
