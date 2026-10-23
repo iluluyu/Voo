@@ -577,3 +577,402 @@ async fn http_cancel_during_stalled_body_keeps_partial() {
         "bytes received before the cancel must be kept for resume"
     );
 }
+
+// ── Content-Range strict parsing & resume-integrity tests ──────────────
+
+#[tokio::test]
+async fn http_206_missing_content_range_header_rejected() {
+    // A 206 without a Content-Range leaves the append offset unknowable;
+    // appending would gamble the partial, so it must be dropped.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &["Content-Length: 5".to_string()],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Content-Range"), "{err}");
+    assert!(
+        !partial.exists(),
+        "partial must be dropped on unusable range metadata"
+    );
+}
+
+#[tokio::test]
+async fn http_206_malformed_content_range_rejected() {
+    // Missing /total: the completeness anchor is gone, so the header cannot
+    // be trusted even though its start parses.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-9".to_string(),
+            "Content-Length: 5".to_string(),
+        ],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Content-Range"), "{err}");
+    assert!(!partial.exists());
+}
+
+#[tokio::test]
+async fn http_206_unit_without_space_rejected() {
+    // `bytes5-9/10` (no unit/number separator) is not a valid byte-content-
+    // range: strict parsing requires `bytes ` + ASCII digits only, so signed
+    // numbers, extra separators, or a missing space are all rejected.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes5-9/10".to_string(),
+            "Content-Length: 5".to_string(),
+        ],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Content-Range"), "{err}");
+    assert!(!partial.exists());
+}
+
+#[tokio::test]
+async fn http_206_reversed_range_rejected() {
+    // start > end is malformed per RFC 9110 — never appended.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 7-3/10".to_string(),
+            "Content-Length: 5".to_string(),
+        ],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Content-Range"), "{err}");
+    assert!(!partial.exists());
+}
+
+#[tokio::test]
+async fn http_206_range_total_contradicting_expected_size_rejected() {
+    // The range describes a 99-byte object, the catalog a 10-byte one.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-9/99".to_string(),
+            "Content-Length: 5".to_string(),
+        ],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("contradicts"),
+        "should name the contradiction: {err}"
+    );
+    assert!(!partial.exists());
+}
+
+#[tokio::test]
+async fn http_206_content_length_contradicting_range_rejected() {
+    // On a 206, Content-Length must count the range body (5 bytes), not an
+    // arbitrary span.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-9/10".to_string(),
+            "Content-Length: 7".to_string(),
+        ],
+        b"67890",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("Content-Length"),
+        "should name the header conflict: {err}"
+    );
+    assert!(!partial.exists());
+}
+
+#[tokio::test]
+async fn http_truncated_206_body_keeps_partial_for_resume() {
+    // Unknown catalog size, no hash: the range total is the only
+    // completeness signal, and the chunked body stops 2 bytes short of the
+    // range end. Must be a resumable error keeping the 8 good bytes — not a
+    // fake completion (the pre-hardening code returned Completed here).
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-9/10".to_string(),
+            "Transfer-Encoding: chunked".to_string(),
+        ],
+        b"3\r\n678\r\n0\r\n\r\n",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(&url, &partial, None, None, &CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("incomplete"), "{err}");
+    assert_eq!(
+        fs::read(&partial).unwrap(),
+        b"12345678",
+        "bytes from the verified range offset must be kept for resume"
+    );
+}
+
+#[tokio::test]
+async fn http_body_beyond_range_end_cleared() {
+    // The range promises 3 bytes (5-7) but the body delivers 5: the first
+    // byte past the range end aborts the transfer and clears the tainted
+    // partial — even though the excess stays inside the object total.
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-7/10".to_string(),
+            "Transfer-Encoding: chunked".to_string(),
+        ],
+        b"5\r\n67890\r\n0\r\n\r\n",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let err = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("more than"), "{err}");
+    assert!(!partial.exists(), "out-of-range data must be cleared");
+}
+
+#[tokio::test]
+async fn http_short_range_response_keeps_partial_without_verifying() {
+    // A lawful short range: the 3-byte body exactly matches `5-7`, but the
+    // file is still 8/10 bytes. That is a resumable error — and no
+    // verification may run, because this is not a completion.
+    let full = b"1234567890";
+    let (url, _server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-7/10".to_string(),
+            "Content-Length: 3".to_string(),
+        ],
+        b"678",
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let verified = std::sync::atomic::AtomicBool::new(false);
+    let flag = &verified;
+    let err = ModelManager::download_http_resumable_with_events(
+        "test/model",
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(full)),
+        &CancellationToken::new(),
+        &|event| {
+            if matches!(event, HttpDownloadEvent::VerificationStarted) {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("incomplete"), "{err}");
+    assert_eq!(fs::read(&partial).unwrap(), b"12345678");
+    assert!(
+        !verified.load(std::sync::atomic::Ordering::SeqCst),
+        "an incomplete range response must not be finalized"
+    );
+}
+
+#[tokio::test]
+async fn http_resume_unknown_expected_size_completes_via_range_total() {
+    // No catalog size: the validated range total anchors completeness and
+    // the hash seals it.
+    let full = b"helloworld";
+    let (url, server) = serve_once(http_response(
+        "206 Partial Content",
+        &[
+            "Content-Range: bytes 5-9/10".to_string(),
+            "Content-Length: 5".to_string(),
+        ],
+        &full[5..],
+    ))
+    .await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, &full[..5]).unwrap();
+
+    let out = run_download(
+        &url,
+        &partial,
+        None,
+        Some(&sha_hex(full)),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(out, HttpDownloadOutcome::Completed));
+    assert_eq!(fs::read(&partial).unwrap(), full);
+    let head = server.await.unwrap();
+    assert!(head.contains("range: bytes=5-"), "got request: {head}");
+}
+
+#[tokio::test]
+async fn http_truncated_fresh_200_keeps_received_bytes_for_resume() {
+    let response = http_response("200 OK", &["Content-Length: 10".to_string()], b"12345678");
+    let (url, server) = serve_once(response).await;
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("fresh.partial");
+    let outcome = run_download(
+        &url,
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(outcome.is_err(), "a truncated body must never finalize");
+    assert_eq!(fs::read(&partial).unwrap(), b"12345678");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn http_cancel_during_resume_stream_keeps_appended_partial() {
+    // Cancel mid-body of a resumed transfer: original + received bytes stay
+    // on disk for the next attempt.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let _ = read_request_head(&mut sock).await;
+        let _ = sock
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-9/10\r\nContent-Length: 5\r\n\r\n67",
+            )
+            .await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+    });
+    let dir = TempDir::new().unwrap();
+    let partial = dir.path().join("m.partial");
+    fs::write(&partial, b"12345").unwrap();
+
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        trigger.cancel();
+    });
+
+    let out = run_download(
+        &format!("http://{}/file", addr),
+        &partial,
+        Some(10),
+        Some(&sha_hex(b"1234567890")),
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(out, HttpDownloadOutcome::Cancelled));
+    assert_eq!(
+        fs::read(&partial).unwrap(),
+        b"1234567",
+        "resumed transfer must keep original + received bytes on cancel"
+    );
+}

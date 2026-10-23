@@ -25,10 +25,32 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// loop and mirror fallback take over instead of hanging forever.
 pub(super) const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Start offset of a `Content-Range: bytes <start>-<end>/<total>` header.
-fn content_range_start(value: &str) -> Option<u64> {
-    let range = value.trim().strip_prefix("bytes")?.trim_start();
-    range.split('-').next()?.trim().parse().ok()
+/// Strictly parse a `Content-Range: bytes <start>-<end>/<total>` header
+/// (RFC 9110 §14.2): exactly one space after the unit, ASCII digits only
+/// for every number (no signs, no inner whitespace, no extra separators),
+/// a numeric total (`*` is only meaningful on a 416, handled before this),
+/// and `start <= end < total`, so callers may rely on that invariant for
+/// all downstream subtraction. Returns `None` for anything malformed.
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    fn digits(s: &str) -> Option<u64> {
+        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            s.parse().ok()
+        } else {
+            None
+        }
+    }
+    let spec = value.trim().strip_prefix("bytes ")?;
+    let (range, total) = spec.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = digits(start)?;
+    let end = digits(end)?;
+    let total = digits(total)?;
+    // `end` is inclusive: a single-byte range has start == end, and the
+    // object's last byte is total-1. Reject reversed / out-of-object ranges.
+    if start > end || end >= total {
+        return None;
+    }
+    Some((start, end, total))
 }
 
 /// How a [`ModelManager::download_http_resumable`] call ended, cancellation
@@ -175,12 +197,19 @@ impl ModelManager {
     ///   cancel token, so a wedged transfer can neither hang the download
     ///   forever nor ignore a cancel
     /// - a 200 to a Range request (server ignored it) restarts from zero
-    ///   rather than appending the whole file to the partial; a 206 must start
-    ///   exactly at our offset or the partial is discarded
-    /// - a server claiming or sending more than the expected size is cut off
-    ///   at the first excess byte, not trusted until it closes the stream
-    /// - the final bytes are checked against `expected_size` (catalog, or
-    ///   content-length when unknown) and `expected_sha256` before returning
+    ///   rather than appending the whole file to the partial; a 206 must
+    ///   carry a strictly valid `Content-Range` (`bytes start-end/total`,
+    ///   `start <= end < total`) starting exactly at our offset, whose total
+    ///   agrees with the catalog size and whose Content-Length (if present)
+    ///   counts the range body — or the partial is discarded
+    /// - a server claiming or sending more than the expected size (or past a
+    ///   range's end) is cut off at the first excess byte, not trusted until
+    ///   it closes the stream
+    /// - a body that stops short of the promised size — catalog size, a
+    ///   validated range total, or content-length, in that order of trust —
+    ///   is a resumable error keeping the partial, never a completion; the
+    ///   final bytes are checked against that size and `expected_sha256`
+    ///   before returning
     async fn download_http_resumable_with_events(
         model_id: &str,
         url: &str,
@@ -249,9 +278,13 @@ impl ModelManager {
             Self::verify_file_with_events(model_id, partial_path, expected_sha256, emit).await?;
             return Ok(HttpDownloadOutcome::Completed);
         }
-        // A 200 to a Range request means the server ignored it and is sending
-        // the whole file; appending it to the partial would corrupt the model.
-        if resume_from > 0 && response.status() == reqwest::StatusCode::OK {
+        // Any non-206 success answering a Range request (a 200 being the
+        // common case) means the server ignored it and is sending the whole
+        // file; appending it to the partial would corrupt the model.
+        if resume_from > 0
+            && response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
             let _ = fs::remove_file(partial_path);
             resume_from = 0;
         }
@@ -261,37 +294,82 @@ impl ModelManager {
                 response.status()
             ));
         }
-        // On a 206, trust but verify the offset: a reply starting anywhere but
-        // exactly our partial's end would silently corrupt the file on append.
-        if resume_from > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-            let starts_at = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(content_range_start);
-            if starts_at != Some(resume_from) {
-                let _ = fs::remove_file(partial_path);
-                return Err(anyhow::anyhow!(
-                    "server returned Content-Range starting at {:?}, expected {}",
-                    starts_at,
-                    resume_from
-                ));
-            }
-        }
-        // When the catalog pins the size, a server advertising a different
-        // total is already misbehaving — reject before writing anything.
-        if let (Some(expected), Some(len)) = (expected_size, response.content_length()) {
-            if resume_from + len != expected {
-                return Err(anyhow::anyhow!(
-                    "server advertises {} bytes, expected {}",
-                    resume_from + len,
-                    expected
-                ));
-            }
-        }
-
-        let known_total =
-            expected_size.or_else(|| response.content_length().map(|l| resume_from + l));
+        // A 206 must carry a strictly valid Content-Range (`bytes
+        // start-end/total`, start <= end < total) that starts exactly at our
+        // partial's end: anything else — malformed, reversed, missing, or
+        // offset elsewhere — would silently corrupt the file on append.
+        // Checked even for a spontaneous 206 (no Range sent): a valid range
+        // starting at 0 is accepted, anything else is a broken server.
+        let (range_total, stream_cap): (Option<u64>, Option<u64>) =
+            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                let raw_range = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok());
+                let (start, end, total) = match raw_range.and_then(parse_content_range) {
+                    Some((start, end, total)) if start == resume_from => (start, end, total),
+                    _ => {
+                        // Unusable range metadata: the partial cannot be trusted
+                        // against this server — restart clean.
+                        let _ = fs::remove_file(partial_path);
+                        return Err(anyhow::anyhow!(
+                            "server returned invalid Content-Range {:?} for resume at byte {}",
+                            raw_range,
+                            resume_from
+                        ));
+                    }
+                };
+                // The range must describe the same object the catalog promised.
+                if let Some(expected) = expected_size {
+                    if total != expected {
+                        let _ = fs::remove_file(partial_path);
+                        return Err(anyhow::anyhow!(
+                            "server Content-Range total {} contradicts expected size {}",
+                            total,
+                            expected
+                        ));
+                    }
+                }
+                // On a 206, Content-Length counts only the range body.
+                let range_len = end
+                    .checked_sub(start)
+                    .and_then(|l| l.checked_add(1))
+                    .expect("parser guarantees start <= end");
+                if let Some(len) = response.content_length() {
+                    if len != range_len {
+                        let _ = fs::remove_file(partial_path);
+                        return Err(anyhow::anyhow!(
+                            "server Content-Length {} contradicts Content-Range of {} bytes",
+                            len,
+                            range_len
+                        ));
+                    }
+                }
+                // The live body may not pass the range's inclusive end — a
+                // server may lawfully return fewer bytes than requested,
+                // never more.
+                (Some(total), Some(end.saturating_add(1)))
+            } else {
+                // When the catalog pins the size, a server advertising a
+                // different total is already misbehaving — reject before
+                // writing anything.
+                if let (Some(expected), Some(len)) = (expected_size, response.content_length()) {
+                    if resume_from.checked_add(len) != Some(expected) {
+                        return Err(anyhow::anyhow!(
+                            "server advertises {} bytes, expected {}",
+                            resume_from.saturating_add(len),
+                            expected
+                        ));
+                    }
+                }
+                (None, expected_size.or_else(|| response.content_length()))
+            };
+        // What the finished file must measure: the catalog size is the trust
+        // anchor, then the validated range total (which also bounds the file
+        // when the catalog size is unknown), then a 200's content length.
+        let known_total = expected_size
+            .or(range_total)
+            .or_else(|| response.content_length());
         let total_size = known_total.unwrap_or(0);
         let mut downloaded = resume_from;
         let mut file = if resume_from > 0 {
@@ -337,11 +415,12 @@ impl ModelManager {
                 }
             };
             // An untrusted server must not be able to fill the disk: cut the
-            // transfer at the first byte past the known total instead of
-            // trusting it to eventually close the stream. Everything written
-            // so far is tainted by a provably-misbehaving server — clear it.
-            if let Some(cap) = known_total {
-                if downloaded + chunk.len() as u64 > cap {
+            // transfer at the first byte past the known total (or a range's
+            // end) instead of trusting it to eventually close the stream.
+            // Everything written so far is tainted by a provably-misbehaving
+            // server — clear it.
+            if let Some(cap) = stream_cap {
+                if downloaded.saturating_add(chunk.len() as u64) > cap {
                     drop(file);
                     let _ = fs::remove_file(partial_path);
                     return Err(anyhow::anyhow!(
@@ -364,7 +443,13 @@ impl ModelManager {
         if let Some(expected) = known_total {
             let actual = partial_path.metadata()?.len();
             if actual != expected {
-                let _ = fs::remove_file(partial_path);
+                // The stream cap already aborts on overshoot, so a mismatch
+                // here means the server closed the body early. Every byte on
+                // disk came from a verified offset, so keep the partial for
+                // the next resume instead of restarting from zero.
+                if actual > expected {
+                    let _ = fs::remove_file(partial_path);
+                }
                 return Err(anyhow::anyhow!(
                     "download incomplete: expected {} bytes, got {}",
                     expected,
