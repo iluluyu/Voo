@@ -900,6 +900,39 @@ pub fn change_word_correction_threshold_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_hotword_rules_setting(app: AppHandle, rules: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.hotword_rules = rules;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_hotword_pinyin_threshold_setting(
+    app: AppHandle,
+    threshold: f64,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.hotword_pinyin_threshold = threshold;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_hotword_dialect_confusion_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.hotword_dialect_confusion = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_extra_recording_buffer_setting(app: AppHandle, ms: u64) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.extra_recording_buffer_ms = ms;

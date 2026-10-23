@@ -2459,73 +2459,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "handy"
-version = "0.9.8"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "earshot",
- "enigo",
- "env_filter",
- "ferrous-opencc",
- "futures-util",
- "gtk",
- "gtk-layer-shell",
- "handy-keys",
- "handy-recorder",
- "hf-hub",
- "hound",
- "isolang",
- "libc",
- "log",
- "natural",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "objc2-service-management",
- "once_cell",
- "rdev",
- "regex",
- "reqwest 0.12.28",
- "rodio",
- "rusqlite",
- "rusqlite_migration",
- "rustfft",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "specta",
- "specta-typescript",
- "strsim",
- "tauri",
- "tauri-build",
- "tauri-nspanel",
- "tauri-plugin-autostart",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-log",
- "tauri-plugin-macos-permissions",
- "tauri-plugin-opener",
- "tauri-plugin-os",
- "tauri-plugin-process",
- "tauri-plugin-single-instance",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "tauri-specta",
- "tempfile",
- "tokio",
- "transcribe-cpp",
- "webview2-com",
- "whatlang",
- "windows 0.61.3",
- "winreg 0.55.0",
-]
-
-[[package]]
 name = "handy-cpal"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4550,6 +4483,12 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pinyin"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e225f595052d9c46045755be4b8d7950b6d9f3c33e0c0b74ba58f11bbfa8c64b"
 
 [[package]]
 name = "piper"
@@ -7564,6 +7503,74 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "voo"
+version = "0.9.8"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "earshot",
+ "enigo",
+ "env_filter",
+ "ferrous-opencc",
+ "futures-util",
+ "gtk",
+ "gtk-layer-shell",
+ "handy-keys",
+ "handy-recorder",
+ "hf-hub",
+ "hound",
+ "isolang",
+ "libc",
+ "log",
+ "natural",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-service-management",
+ "once_cell",
+ "pinyin",
+ "rdev",
+ "regex",
+ "reqwest 0.12.28",
+ "rodio",
+ "rusqlite",
+ "rusqlite_migration",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "specta",
+ "specta-typescript",
+ "strsim",
+ "tauri",
+ "tauri-build",
+ "tauri-nspanel",
+ "tauri-plugin-autostart",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-log",
+ "tauri-plugin-macos-permissions",
+ "tauri-plugin-opener",
+ "tauri-plugin-os",
+ "tauri-plugin-process",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "tauri-specta",
+ "tempfile",
+ "tokio",
+ "transcribe-cpp",
+ "webview2-com",
+ "whatlang",
+ "windows 0.61.3",
+ "winreg 0.55.0",
 ]
 
 [[package]]

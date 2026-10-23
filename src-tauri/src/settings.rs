@@ -441,6 +441,15 @@ pub struct AppSettings {
     pub log_level: LogLevel,
     #[serde(default)]
     pub custom_words: Vec<String>,
+    /// 中文热词规则文本（每行 `模式=替换` 字面量或 `模式=>替换` 正则）
+    #[serde(default)]
+    pub hotword_rules: String,
+    /// 中文拼音热词相似度阈值（越大越保守）
+    #[serde(default = "default_hotword_pinyin_threshold")]
+    pub hotword_pinyin_threshold: f64,
+    /// 启用方言混淆（n/l、f/h 声母）
+    #[serde(default)]
+    pub hotword_dialect_confusion: bool,
     #[serde(default)]
     pub model_unload_timeout: ModelUnloadTimeout,
     #[serde(default = "default_word_correction_threshold")]
@@ -626,6 +635,10 @@ fn default_log_level() -> LogLevel {
 
 fn default_word_correction_threshold() -> f64 {
     0.18
+}
+
+fn default_hotword_pinyin_threshold() -> f64 {
+    crate::audio_toolkit::chinese_hotwords::DEFAULT_THRESHOLD
 }
 
 fn default_paste_delay_ms() -> u64 {
@@ -984,6 +997,9 @@ pub fn get_default_settings() -> AppSettings {
         debug_mode: false,
         log_level: default_log_level(),
         custom_words: Vec::new(),
+        hotword_rules: String::new(),
+        hotword_pinyin_threshold: default_hotword_pinyin_threshold(),
+        hotword_dialect_confusion: false,
         model_unload_timeout: ModelUnloadTimeout::default(),
         word_correction_threshold: default_word_correction_threshold(),
         history_limit: default_history_limit(),

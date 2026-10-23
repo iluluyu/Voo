@@ -28,7 +28,7 @@
     "customModelDescription": "非官方支持",
     "migration": {
       "title": "您的模型需要更新",
-      "description": "Handy 现在使用一种更新的模型类型。请下载新版本以继续转录。旧版本将被移除。",
+      "description": "Voo 现在使用一种更新的模型类型。请下载新版本以继续转录。旧版本将被移除。",
       "replaces": "替代 {{name}}",
       "oldFormat": "旧格式",
       "failed": "下载失败",
@@ -69,7 +69,7 @@
     },
     "permissions": {
       "title": "需要权限",
-      "description": "Handy 需要一些权限才能正常工作。",
+      "description": "Voo 需要一些权限才能正常工作。",
       "microphone": {
         "title": "麦克风访问",
         "description": "需要听取您的语音进行转录。"
@@ -130,7 +130,7 @@
       "deleteActiveConfirm": "{{modelName}} 是您当前使用的模型。删除后将停止转录，直到您选择新的模型。确定要删除吗？",
       "deleteTitle": "删除模型",
       "retiredNotice": {
-        "title": "旧模型已无法在 Handy 中使用",
+        "title": "旧模型已无法在 Voo 中使用",
         "description": "它们占用了您电脑上 {{size}} 的空间。",
         "delete": "删除模型",
         "deleted": "已删除旧模型",
@@ -147,13 +147,13 @@
       "searchPlaceholder": "按名称搜索模型…",
       "rescan": {
         "label": "重新扫描",
-        "tooltip": "重新扫描在 Handy 之外添加到模型文件夹或 Hugging Face 缓存中的模型"
+        "tooltip": "重新扫描在 Voo 之外添加到模型文件夹或 Hugging Face 缓存中的模型"
       }
     },
     "general": {
       "title": "通用",
       "shortcut": {
-        "title": "Handy 快捷键",
+        "title": "Voo 快捷键",
         "description": "配置启动语音转文字录制的键盘快捷键",
         "loading": "加载快捷键中...",
         "none": "未配置快捷键",
@@ -261,11 +261,11 @@
       },
       "autostart": {
         "label": "开机启动",
-        "description": "登录计算机时自动启动 Handy。"
+        "description": "登录计算机时自动启动 Voo。"
       },
       "showTrayIcon": {
         "label": "显示托盘图标",
-        "description": "在系统托盘中显示 Handy 图标。"
+        "description": "在系统托盘中显示 Voo 图标。"
       },
       "overlay": {
         "style": {
@@ -345,11 +345,26 @@
       },
       "customWords": {
         "title": "自定义词汇",
-        "description": "帮助受支持的模型识别名称和专业术语。目前，模糊纠错仅适用于使用 A–Z 字母和数字的词语。",
+        "description": "帮助受支持的模型识别名称和专业术语。含汉字的词（至少 2 个汉字）会进入拼音热词索引，自动纠正同音/近音错字。",
         "placeholder": "添加词汇",
         "add": "添加",
         "remove": "删除 {{word}}",
         "duplicate": "\"{{word}}\" 已存在"
+      },
+      "hotwordRules": {
+        "title": "中文热词规则",
+        "description": "每行一条：`模式=替换` 按字面量替换，`模式=>替换` 按正则替换。在拼音热词之后应用。以 # 开头的行是注释。",
+        "placeholder": "中州韵=中州韵输入法\n四([个只])=>四条$1",
+        "hint": "Ctrl+Enter 或失焦时保存",
+        "save": "保存"
+      },
+      "hotwordThreshold": {
+        "title": "拼音热词阈值",
+        "description": "中文热词拼音匹配的相似度阈值（0.5–1.0）。越高越保守：0.85 默认值只纠正同音字与单项近音混淆。"
+      },
+      "hotwordDialect": {
+        "label": "方言混淆匹配",
+        "description": "允许 n/l、f/h 声母互相匹配（如“牛/刘”）。口音较重时开启，但会增加误替换风险。"
       },
       "voiceActivityDetection": {
         "title": "语音活动检测",
@@ -483,7 +498,7 @@
       },
       "updateChecks": {
         "label": "检查更新",
-        "description": "自动检查 Handy 的新版本",
+        "description": "自动检查 Voo 的新版本",
         "lockedDescription": "已被系统配置禁用 (HANDY_DISABLE_UPDATER)"
       },
       "soundTheme": {
@@ -561,7 +576,7 @@
       },
       "keyboardDiagnostic": {
         "title": "键盘诊断",
-        "description": "检查键盘事件是否能到达 Handy。仅记录事件数量，绝不记录您按了哪些键。",
+        "description": "检查键盘事件是否能到达 Voo。仅记录事件数量，绝不记录您按了哪些键。",
         "run": "运行 10 秒诊断",
         "running": "正在监听… 请按几次您的快捷键（例如 Option+Space）",
         "secureInputLabel": "Secure Input",
@@ -575,7 +590,7 @@
         "mouse": "鼠标",
         "verdictBlocked": "Secure Input 正在阻止按键事件——在问题解决前，包含普通按键的快捷键无法工作。",
         "verdictSuspicious": "收到了修饰键事件，但没有按键事件——尽管 Secure Input 报告为已禁用，仍有程序在抑制按键。请在 GitHub 上反馈此问题。",
-        "verdictOk": "按键事件正常到达 Handy。",
+        "verdictOk": "按键事件正常到达 Voo。",
         "verdictNoEvents": "未捕获到任何事件——测试期间您按过键吗？",
         "failed": "诊断失败：{{error}}"
       },
@@ -598,11 +613,11 @@
       "title": "关于",
       "version": {
         "title": "版本",
-        "description": "Handy 的当前版本"
+        "description": "Voo 的当前版本"
       },
       "appDataDirectory": {
         "title": "应用数据目录",
-        "description": "Handy 存储数据的位置"
+        "description": "Voo 存储数据的位置"
       },
       "sourceCode": {
         "title": "源代码",
@@ -611,7 +626,7 @@
       },
       "supportDevelopment": {
         "title": "支持开发",
-        "description": "帮助我们继续开发 Handy",
+        "description": "帮助我们继续开发 Voo",
         "button": "捐赠"
       },
       "acknowledgments": {
@@ -619,12 +634,12 @@
         "ggml": {
           "title": "ggml",
           "description": "OpenAI Whisper 自动语音识别模型的高性能推理",
-          "details": "Handy 使用 ggml 进行快速的本地语音转文字处理。感谢 Georgi Gerganov 和贡献者们的出色工作。"
+          "details": "Voo 使用 ggml 进行快速的本地语音转文字处理。感谢 Georgi Gerganov 和贡献者们的出色工作。"
         }
       },
       "whatsNewUpdates": {
         "label": "显示新功能",
-        "description": "Handy 更新后显示发行说明"
+        "description": "Voo 更新后显示发行说明"
       }
     }
   },
@@ -654,7 +669,7 @@
     "noOptionsFound": "未找到选项"
   },
   "accessibility": {
-    "permissionsDescription": "Handy 需要辅助功能权限才能输入转录的文字。",
+    "permissionsDescription": "Voo 需要辅助功能权限才能输入转录的文字。",
     "openSettings": "打开系统设置"
   },
   "errors": {
@@ -677,11 +692,11 @@
   },
   "appLanguage": {
     "title": "应用语言",
-    "description": "更改 Handy 界面的语言"
+    "description": "更改 Voo 界面的语言"
   },
   "theme": {
     "title": "应用主题",
-    "description": "选择 Handy 跟随系统主题，还是保持浅色或深色",
+    "description": "选择 Voo 跟随系统主题，还是保持浅色或深色",
     "options": {
       "system": "跟随系统",
       "light": "浅色",
@@ -694,7 +709,7 @@
     "loadingModel": "正在加载模型..."
   },
   "whatsNew": {
-    "title": "Handy v{{version}} 新功能"
+    "title": "Voo v{{version}} 新功能"
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} 可能正在阻止 1 个快捷键",

@@ -1,3 +1,4 @@
+use crate::audio_toolkit::chinese_hotwords;
 use crate::audio_toolkit::chunking;
 use crate::audio_toolkit::{
     apply_custom_words, detect_output_language, normalize_transcription_output,
@@ -1502,7 +1503,37 @@ fn post_process_transcription_text(
             _ => raw,
         };
 
-        let corrected = if !settings.custom_words.is_empty() && !custom_words_already_prompted {
+        let corrected = if chinese_hotwords::has_han(&raw) && !settings.custom_words.is_empty() {
+            // Voo 中文路径：拼音热词后处理（引擎无关；无论引擎 vocabulary
+            // 是否已注入都执行——拼音匹配对已正确的热词自匹配安全跳过），
+            // 随后应用正则替换规则。
+            let index = chinese_hotwords::build_hotword_index(
+                &settings.custom_words,
+                chinese_hotwords::DEFAULT_MIN_HAN,
+            );
+            let opts = chinese_hotwords::ConfusionOptions {
+                dialect: settings.hotword_dialect_confusion,
+            };
+            let (corrected, hits) = chinese_hotwords::apply_pinyin_hotwords(
+                &raw,
+                &index,
+                settings.hotword_pinyin_threshold,
+                &opts,
+            );
+            for (from, to, score) in &hits {
+                info!("Chinese hotword: '{from}' -> '{to}' (similarity {score:.2})");
+            }
+            if settings.hotword_rules.is_empty() {
+                corrected
+            } else {
+                let (rules, rule_errors) =
+                    chinese_hotwords::parse_hotword_rules(&settings.hotword_rules);
+                if !rule_errors.is_empty() {
+                    warn!("Hotword rules failed to parse on lines {rule_errors:?}");
+                }
+                chinese_hotwords::apply_hotword_rules(&corrected, &rules)
+            }
+        } else if !settings.custom_words.is_empty() && !custom_words_already_prompted {
             apply_custom_words(
                 &raw,
                 &settings.custom_words,
