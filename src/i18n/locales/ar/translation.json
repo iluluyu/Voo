@@ -487,6 +487,23 @@
           "separate": "Dedicated shortcut only"
         }
       },
+      "thinking": {
+        "title": "Thinking Depth",
+        "description": "How much the post-processing model reasons before rewriting your transcript.",
+        "options": {
+          "none": "No Thinking (fastest)",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High"
+        },
+        "descriptions": {
+          "none": "Rewrites directly",
+          "low": "Light reasoning",
+          "medium": "Balanced; DeepSeek uses Low",
+          "high": "Most thorough, slowest"
+        },
+        "deepseekNote": "DeepSeek has no medium tier: Medium is sent as Low to prioritize speed."
+      },
       "api": {
         "title": "API",
         "provider": {

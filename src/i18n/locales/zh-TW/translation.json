@@ -517,6 +517,23 @@
           "separate": "僅專用快捷鍵"
         }
       },
+      "thinking": {
+        "title": "思考深度",
+        "description": "後處理模型改寫文字前的推理力度。",
+        "options": {
+          "none": "不思考（最快）",
+          "low": "低",
+          "medium": "中",
+          "high": "高"
+        },
+        "descriptions": {
+          "none": "直接改寫",
+          "low": "少量推理",
+          "medium": "平衡，DeepSeek 會取低",
+          "high": "最徹底但最慢"
+        },
+        "deepseekNote": "DeepSeek 無 medium 粒度，中檔向下取 low，優先保證速度。"
+      },
       "api": {
         "title": "API",
         "provider": {

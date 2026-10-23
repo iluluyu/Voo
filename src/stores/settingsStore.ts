@@ -6,6 +6,7 @@ import type {
   AudioDevice,
   PostProcessApiFormat,
   PostProcessMode,
+  ThinkingLevel,
   ChineseScript,
   TranscribeAcceleratorSetting,
   ShortcutActivation,
@@ -169,6 +170,17 @@ const settingUpdaters: {
     commands.changePostProcessEnabledSetting(value as boolean),
   post_process_mode: (value) =>
     commands.changePostProcessModeSetting(value as PostProcessMode),
+  post_process_thinking: async (value) => {
+    const result = await commands.changePostProcessThinkingSetting(
+      value as ThinkingLevel,
+    );
+    if (result.status === "error") {
+      // Rejected switches roll the selector back via the throw below; the
+      // toast tells the user why.
+      toast.error(result.error);
+      throw new Error(result.error);
+    }
+  },
   post_process_context_enabled: (value) =>
     commands.changePostProcessContextEnabledSetting(value as boolean),
   post_process_selected_prompt_id: (value) =>

@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Plus, RefreshCcw, Trash2 } from "lucide-react";
-import { commands, type PostProcessApiFormat, type PostProcessMode } from "@/bindings";
+import {
+  commands,
+  type PostProcessApiFormat,
+  type PostProcessMode,
+  type ThinkingLevel,
+} from "@/bindings";
 
 import { Alert } from "../../ui/Alert";
 import {
@@ -31,8 +36,42 @@ const PostProcessingSettingsTriggerComponent: React.FC = () => {
   const mode = getSetting("post_process_mode") ?? "always";
   const isModeUpdating = isUpdating("post_process_mode");
 
+  const thinking = getSetting("post_process_thinking") ?? "none";
+  const isThinkingUpdating = isUpdating("post_process_thinking");
+
+  const thinkingOptions: {
+    value: ThinkingLevel;
+    label: string;
+    description: string;
+  }[] = [
+    {
+      value: "none",
+      label: t("settings.postProcessing.thinking.options.none"),
+      description: t("settings.postProcessing.thinking.descriptions.none"),
+    },
+    {
+      value: "low",
+      label: t("settings.postProcessing.thinking.options.low"),
+      description: t("settings.postProcessing.thinking.descriptions.low"),
+    },
+    {
+      value: "medium",
+      label: t("settings.postProcessing.thinking.options.medium"),
+      description: t("settings.postProcessing.thinking.descriptions.medium"),
+    },
+    {
+      value: "high",
+      label: t("settings.postProcessing.thinking.options.high"),
+      description: t("settings.postProcessing.thinking.descriptions.high"),
+    },
+  ];
+
   const handleModeChange = (value: PostProcessMode) => {
     updateSetting("post_process_mode", value);
+  };
+
+  const handleThinkingChange = (value: ThinkingLevel) => {
+    updateSetting("post_process_thinking", value);
   };
 
   return (
@@ -82,6 +121,46 @@ const PostProcessingSettingsTriggerComponent: React.FC = () => {
           grouped={true}
         />
       )}
+
+      <SettingContainer
+        title={t("settings.postProcessing.thinking.title")}
+        description={t("settings.postProcessing.thinking.description")}
+        descriptionMode="tooltip"
+        layout="stacked"
+        grouped={true}
+      >
+        <div className="flex flex-col gap-2">
+          <div
+            role="radiogroup"
+            aria-label={t("settings.postProcessing.thinking.title")}
+            className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+          >
+            {thinkingOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={thinking === option.value}
+                disabled={isThinkingUpdating}
+                onClick={() => handleThinkingChange(option.value)}
+                className={`flex flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-start transition-colors duration-150 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                  thinking === option.value
+                    ? "border-logo-primary bg-logo-primary/20"
+                    : "border-mid-gray/20 bg-mid-gray/10 hover:border-logo-primary hover:bg-logo-primary/10"
+                }`}
+              >
+                <span className="text-sm font-semibold">{option.label}</span>
+                <span className="text-xs text-mid-gray/70">
+                  {option.description}
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-mid-gray/70">
+            {t("settings.postProcessing.thinking.deepseekNote")}
+          </p>
+        </div>
+      </SettingContainer>
     </>
   );
 };

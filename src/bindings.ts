@@ -1349,6 +1349,11 @@ learn_from_corrections_enabled?: boolean; history_limit?: number; recording_rete
  */
 post_process_mode?: PostProcessMode; 
 /**
+ * 后处理思考档位：`none`（默认，最快）/`low`/`medium`/`high`。
+ * 服务商映射见 [`ThinkingLevel`]。
+ */
+post_process_thinking?: ThinkingLevel; 
+/**
  * LLM 后处理的聚焦上下文注入：录音开始前（overlay 显示前）一次性
  * 采集前台 App 标识与（Windows/macOS 可行时）游标前 ≤128 字符，作
  * 为单独标注的不可信数据字段发给所配置的 LLM 服务商。仅在
