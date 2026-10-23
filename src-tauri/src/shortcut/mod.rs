@@ -24,7 +24,8 @@ use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
     self, get_settings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
     LLMPrompt, OverlayPosition, OverlayStyle, PasteMethod, PostProcessMode, ShortcutActivation,
-    ShortcutBinding, SoundTheme, Theme, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
+    ShortcutBinding, SoundTheme, Theme, ThinkingLevel, TypingTool, VadBackend,
+    APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -1802,6 +1803,30 @@ pub fn change_clipboard_handling_setting(app: AppHandle, handling: String) -> Re
         }
     };
     settings.clipboard_handling = parsed;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+/// 后处理思考深度（none/low/medium/high）。未知值静默回落到 none：
+/// 宁可不思考，也不要因为设置项拼错而悄悄变慢。
+#[tauri::command]
+#[specta::specta]
+pub fn change_post_process_thinking_setting(app: AppHandle, level: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    let parsed = match level.as_str() {
+        "none" => ThinkingLevel::None,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        other => {
+            warn!(
+                "Invalid post-process thinking level '{}', using none",
+                other
+            );
+            ThinkingLevel::None
+        }
+    };
+    settings.post_process_thinking = parsed;
     settings::write_settings(&app, settings);
     Ok(())
 }

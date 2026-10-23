@@ -677,6 +677,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_external_script_path_setting,
             shortcut::change_clipboard_handling_setting,
             shortcut::change_auto_submit_setting,
+            shortcut::change_post_process_thinking_setting,
             shortcut::change_auto_submit_key_setting,
             shortcut::change_post_process_enabled_setting,
             shortcut::change_post_process_mode_setting,
