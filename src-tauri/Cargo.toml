@@ -1,6 +1,6 @@
 [package]
 name = "voo"
-version = "0.9.8"
+version = "0.1.0"
 description = "Voo"
 authors = ["cjpais"]
 edition = "2021"
