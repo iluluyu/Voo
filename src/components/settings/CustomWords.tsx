@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { commands, type LexiconResolution } from "@/bindings";
 import { useSettings } from "../../hooks/useSettings";
 import { Input } from "../ui/Input";
 import { Button } from "../ui/Button";
@@ -26,6 +27,9 @@ interface BulkPreview {
   invalid: number;
 }
 
+/** 词条解析批大小上限：只解析当前可见切片，词表再大也不会打爆后端。 */
+const LOOKUP_CHUNK = 200;
+
 /**
  * 自定义词汇：可按行批量添加、搜索、分页渲染与导出。
  *
@@ -41,6 +45,11 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
     const [search, setSearch] = useState("");
     const [bulkText, setBulkText] = useState<string | null>(null);
     const [visible, setVisible] = useState(RENDER_LIMIT);
+    /** term → 后端裁决（来源/档位/解释）；仅当前可见切片。 */
+    const [resolutions, setResolutions] = useState<
+      Record<string, LexiconResolution>
+    >({});
+    const lookupIdRef = useRef(0);
 
     const customWords = getSetting("custom_words") || [];
     const normalizedWord = normalizeCustomWord(newWord);
@@ -129,6 +138,34 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
 
     const shown = filtered.slice(0, visible);
     const remaining = filtered.length - shown.length;
+
+    /** 可见切片的稳定键（避免每次渲染都重发批量解析）。 */
+    const shownKey = shown.join("\u0000");
+    useEffect(() => {
+      const terms = shownKey ? shownKey.split("\u0000") : [];
+      if (terms.length === 0) {
+        setResolutions({});
+        return;
+      }
+      const requestId = ++lookupIdRef.current;
+      let cancelled = false;
+      commands
+        .lookupLexiconTerms(terms.slice(0, LOOKUP_CHUNK))
+        .then((result) => {
+          if (cancelled || requestId !== lookupIdRef.current) return;
+          // 解析失败不阻断列表：徽章回退为默认文案即可。
+          if (result.status === "error") return;
+          const next: Record<string, LexiconResolution> = {};
+          for (const row of result.data) next[row.term] = row;
+          setResolutions(next);
+        })
+        .catch(() => {
+          /* 同上：静默回退 */
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [shownKey]);
 
     return (
       <>
@@ -244,32 +281,45 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
           <div
             className={`px-4 p-2 ${grouped ? "" : "rounded-lg border border-mid-gray/20"} max-h-64 flex flex-wrap gap-1 overflow-auto`}
           >
-            {shown.map((word) => (
-              <Button
-                key={word}
-                onClick={() => handleRemoveWord(word)}
-                disabled={updating}
-                variant="secondary"
-                size="sm"
-                className="inline-flex items-center gap-1 cursor-pointer"
-                aria-label={t("settings.advanced.customWords.remove", { word })}
-              >
-                <span className="max-w-52 truncate">{word}</span>
-                <svg
-                  className="w-3 h-3"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </Button>
-            ))}
+            {shown.map((word) => {
+              const resolution = resolutions[word];
+              const badgeText = t("settings.advanced.customWords.sourceCustom");
+              return (
+                <div key={word} className="inline-flex items-center gap-1">
+                  <Button
+                    onClick={() => handleRemoveWord(word)}
+                    disabled={updating}
+                    variant="secondary"
+                    size="sm"
+                    className="inline-flex items-center gap-1 cursor-pointer"
+                    aria-label={t("settings.advanced.customWords.remove", {
+                      word,
+                    })}
+                  >
+                    <span className="max-w-52 truncate">{word}</span>
+                    <svg
+                      className="w-3 h-3"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </Button>
+                  <span
+                    className="cursor-help rounded-full border border-mid-gray/30 px-1.5 py-px text-[10px] leading-4 text-mid-gray select-none"
+                    title={resolution?.explanation || badgeText}
+                  >
+                    {badgeText}
+                  </span>
+                </div>
+              );
+            })}
             {remaining > 0 && (
               <Button
                 onClick={() => setVisible((v) => v + RENDER_LIMIT)}

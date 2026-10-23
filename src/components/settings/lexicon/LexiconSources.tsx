@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ChevronDown, ChevronRight } from "lucide-react";
@@ -7,6 +7,7 @@ import {
   type LexiconScope,
   type LexiconSourceInfo,
   type OpenLexiconPreview,
+  type TermMode,
 } from "@/bindings";
 import { useSettings } from "../../../hooks/useSettings";
 import Badge from "../../ui/Badge";
@@ -33,6 +34,32 @@ type LimitChoice = (typeof LIMIT_CHOICES)[number];
 const DEFAULT_LIMIT: LimitChoice = 2000;
 
 const SCOPES = ["all", "latin_only", "han_only"] as const;
+
+/** 来源级三档模式（`blocked` 不是来源级档位，见后端命令注释）。 */
+const SOURCE_MODES = ["candidate", "active_exact", "active_fuzzy"] as const;
+type SourceMode = (typeof SOURCE_MODES)[number];
+
+/** 后端未显式记录时导入源的缺省档位（与解析器一致，见 lexicon_resolver）。 */
+const DEFAULT_SOURCE_MODE: SourceMode = "active_exact";
+
+const MODE_LABEL_KEYS: Record<SourceMode, string> = {
+  candidate: "modeCandidate",
+  active_exact: "modeExact",
+  active_fuzzy: "modeFuzzy",
+};
+
+/** 目录 id → `imported_lexicons` 存储键（THUOCL 目录 id 带 `thuocl-` 前缀，
+ * 存储键是裸分类名）。 */
+const storageKeyOf = (s: LexiconSourceInfo) =>
+  s.group === "thuocl" ? s.id.replace(/^thuocl-/, "") : s.id;
+
+interface InstalledRow {
+  /** `imported_lexicons` 的存储键 */
+  sourceKey: string;
+  count: number;
+  /** 目录里的对应源；未知来源（如旧版残留键）为 null */
+  info: LexiconSourceInfo | null;
+}
 
 interface DialogState {
   source: LexiconSourceInfo;
@@ -77,10 +104,24 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
     const [dialog, setDialog] = useState<DialogState | null>(null);
     const [pendingRemove, setPendingRemove] = useState<string | null>(null);
     const [removing, setRemoving] = useState<string | null>(null);
+    /** 正在切换模式的来源键（单飞：整设置读改写，禁止并发） */
+    const [modeBusy, setModeBusy] = useState<string | null>(null);
+    /** 模式切换的乐观覆盖：store 尚未同步时先显示目标档位；
+     * 失败即清空（回滚），成功则等 settings 广播追平后由 effect 清空。 */
+    const [modeOverride, setModeOverride] = useState<{
+      sourceKey: string;
+      mode: SourceMode;
+    } | null>(null);
+    /** 模式切换失败的行内错误文案（key 定位到出错的那一行）。 */
+    const [modeError, setModeError] = useState<{
+      sourceKey: string;
+      message: string;
+    } | null>(null);
     /** 弹窗内预览/确认的请求序号：任何新交互使旧的异步结果失效 */
     const requestIdRef = useRef(0);
 
     const importedLexicons = getSetting("imported_lexicons") || {};
+    const lexiconSourceModes = getSetting("lexicon_source_modes") || {};
 
     useEffect(() => {
       let cancelled = false;
@@ -100,7 +141,48 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
     }, []);
 
     const installedCount = (source: LexiconSourceInfo) =>
-      importedLexicons[source.id]?.length ?? 0;
+      importedLexicons[storageKeyOf(source)]?.length ?? 0;
+
+    /** 存储键已存在即视为已安装（空快照也算，避免重复导入）。 */
+    const isInstalled = (source: LexiconSourceInfo) =>
+      importedLexicons[storageKeyOf(source)] !== undefined;
+
+    /** 已安装来源全量清单：以 `imported_lexicons` 为准（一源一行，
+     * 渲染**每一个**键），目录只用来补充名称/描述/更新入口；
+     * 目录加载失败也照常渲染。 */
+    const installedRows: InstalledRow[] = useMemo(() => {
+      const byKey = new Map<string, LexiconSourceInfo>();
+      for (const s of sources ?? []) byKey.set(storageKeyOf(s), s);
+      return Object.entries(importedLexicons)
+        .map(([sourceKey, words]) => ({
+          sourceKey,
+          count: words?.length ?? 0,
+          info: byKey.get(sourceKey) ?? null,
+        }))
+        .sort((a, b) =>
+          (a.info?.label ?? a.sourceKey).localeCompare(
+            b.info?.label ?? b.sourceKey,
+          ),
+        );
+    }, [sources, importedLexicons]);
+
+    /** 当前生效档位：乐观覆盖优先，未显式记录时为导入源缺省
+     * （active_exact）。 */
+    const currentMode = (sourceKey: string): TermMode =>
+      modeOverride?.sourceKey === sourceKey
+        ? modeOverride.mode
+        : (lexiconSourceModes[sourceKey] ?? DEFAULT_SOURCE_MODE);
+
+    /** 乐观值被 store 追平（settings 广播已重拉）后清掉覆盖，
+     * 避免残留的覆盖值遮蔽后续真实状态。 */
+    useEffect(() => {
+      if (
+        modeOverride &&
+        lexiconSourceModes[modeOverride.sourceKey] === modeOverride.mode
+      ) {
+        setModeOverride(null);
+      }
+    }, [modeOverride, lexiconSourceModes]);
 
     const copyText = async (text: string, copiedKey: string) => {
       try {
@@ -148,7 +230,7 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
       setLoadError(null);
       setDialog({
         source,
-        mode: installedCount(source) > 0 ? "update" : "import",
+        mode: isInstalled(source) ? "update" : "import",
         scope: "all",
         limit: DEFAULT_LIMIT,
         preview: null,
@@ -210,13 +292,13 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
       }
     };
 
-    const handleRemove = async (source: LexiconSourceInfo) => {
+    const handleRemove = async (sourceId: string) => {
       if (removing || dialog) return;
       const requestId = ++requestIdRef.current;
       setLoadError(null);
-      setRemoving(source.id);
+      setRemoving(sourceId);
       try {
-        const result = await commands.removeImportedLexicon(source.id);
+        const result = await commands.removeImportedLexicon(sourceId);
         if (result.status === "error") {
           throw new Error(result.error);
         }
@@ -233,6 +315,32 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
       }
     };
 
+    /** 切换来源级三档模式。后端整设置读改写，所以同一时刻只允许一个
+     * 在途请求；先乐观显示目标档位，成功由 settings-changed 广播驱动
+     * store 重拉追平，失败回滚乐观覆盖并显示行内错误。 */
+    const handleSetMode = async (sourceKey: string, mode: SourceMode) => {
+      if (modeBusy) return;
+      setModeBusy(sourceKey);
+      setModeOverride({ sourceKey, mode });
+      setModeError(null);
+      try {
+        const result = await commands.setLexiconSourceMode(sourceKey, mode);
+        if (result.status === "error") {
+          throw new Error(result.error);
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        // 回滚本地乐观状态（档位显示回到 store 里的真实值）
+        setModeOverride((prev) =>
+          prev?.sourceKey === sourceKey ? null : prev,
+        );
+        setModeError({ sourceKey, message });
+        toast.error(t(key("modeError"), { message }));
+      } finally {
+        setModeBusy(null);
+      }
+    };
+
     const key = (k: string) => `settings.lexicon.sources.${k}`;
 
     const managed = (sources ?? []).filter((s) =>
@@ -243,15 +351,14 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
         !(MANAGED_GROUPS as readonly string[]).includes(s.group) &&
         s.group !== "thuocl",
     );
-    const installedManaged = managed.filter((s) => installedCount(s) > 0);
 
-    const renderRow = (source: LexiconSourceInfo, inInstalled: boolean) => {
+    const renderRow = (source: LexiconSourceInfo) => {
       const count = installedCount(source);
-      const isInstalled = count > 0;
+      const installed = isInstalled(source);
       const rowBusy = removing !== null || dialog !== null;
       return (
         <div
-          key={`${inInstalled ? "i" : "g"}-${source.id}`}
+          key={`g-${source.id}`}
           className="flex flex-col gap-1 rounded-md border border-mid-gray/20 p-2"
         >
           <div className="flex flex-wrap items-center gap-2">
@@ -260,77 +367,127 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
             {source.recommended ? (
               <Badge variant="success">{t(key("recommended"))}</Badge>
             ) : (
-              !inInstalled && (
-                <span className="text-xs text-mid-gray">
-                  {t(key("notRecommended"))}
-                </span>
-              )
+              <span className="text-xs text-mid-gray">
+                {t(key("notRecommended"))}
+              </span>
             )}
             <span className="ml-auto text-xs text-mid-gray">
-              {isInstalled
+              {installed
                 ? t(key("statusInstalled"), { count })
                 : t(key("statusNotInstalled"))}
             </span>
           </div>
           <p className="text-xs text-mid-gray">{source.description}</p>
           <div className="flex flex-wrap items-center gap-2">
-            {inInstalled ? (
-              <>
+            {/* 已安装的源在这里只显示状态：导入按钮禁用（避免重复导入），
+                更新入口在上方“已安装”区块。 */}
+            <Button
+              onClick={() => openDialog(source)}
+              disabled={rowBusy || installed}
+              variant={installed ? "secondary" : "primary"}
+              size="sm"
+            >
+              {installed ? t(key("installedDisabled")) : t(key("import"))}
+            </Button>
+          </div>
+        </div>
+      );
+    };
+
+    /** 已安装来源一行：名称、词数、三档模式切换、更新（有目录条目时）、
+     * 移除（两步确认）。以 `imported_lexicons` 为准全量渲染。 */
+    const renderInstalledRow = (row: InstalledRow) => {
+      const { sourceKey, count, info } = row;
+      const label = info?.label ?? sourceKey;
+      const mode = currentMode(sourceKey);
+      const busy = removing !== null || dialog !== null || modeBusy !== null;
+      return (
+        <div
+          key={`installed-${sourceKey}`}
+          className="flex flex-col gap-1 rounded-md border border-mid-gray/20 p-2"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{label}</span>
+            {info ? (
+              <Badge variant="secondary">{info.license}</Badge>
+            ) : (
+              <Badge variant="secondary">{t(key("unknownSource"))}</Badge>
+            )}
+            <span className="ml-auto text-xs text-mid-gray">
+              {t(key("statusInstalled"), { count })}
+            </span>
+          </div>
+          {info && <p className="text-xs text-mid-gray">{info.description}</p>}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-mid-gray">
+              {t(key("modeLabel"))}
+            </span>
+            {SOURCE_MODES.map((m) => (
+              <Button
+                key={m}
+                onClick={() => void handleSetMode(sourceKey, m)}
+                disabled={busy || mode === m}
+                variant={mode === m ? "primary" : "secondary"}
+                size="sm"
+                aria-pressed={mode === m}
+              >
+                {t(key(MODE_LABEL_KEYS[m]))}
+              </Button>
+            ))}
+            {mode === "blocked" && (
+              <Badge variant="secondary">{t(key("modeBlocked"))}</Badge>
+            )}
+            {modeError?.sourceKey === sourceKey && (
+              <p className="w-full text-xs text-red-400">
+                {t(key("modeError"), { message: modeError.message })}
+              </p>
+            )}
+            {info && (
+              <Button
+                onClick={() => openDialog(info)}
+                disabled={busy}
+                variant="secondary"
+                size="sm"
+              >
+                {t(key("update"))}
+              </Button>
+            )}
+            {pendingRemove === sourceKey ? (
+              <span className="inline-flex items-center gap-1 rounded border border-red-400/40 px-1 py-0.5">
+                <span className="text-xs text-red-400">
+                  {t(key("removeConfirm"), { source: label })}
+                </span>
                 <Button
-                  onClick={() => openDialog(source)}
-                  disabled={rowBusy}
+                  onClick={() => {
+                    setPendingRemove(null);
+                    void handleRemove(sourceKey);
+                  }}
+                  disabled={removing !== null}
+                  variant="primary"
+                  size="sm"
+                >
+                  {t(key("removeConfirmYes"))}
+                </Button>
+                <Button
+                  onClick={() => setPendingRemove(null)}
+                  disabled={removing !== null}
                   variant="secondary"
                   size="sm"
                 >
-                  {t(key("update"))}
+                  {t(key("cancel"))}
                 </Button>
-                {pendingRemove === source.id ? (
-                  <span className="inline-flex items-center gap-1 rounded border border-red-400/40 px-1 py-0.5">
-                    <span className="text-xs text-red-400">
-                      {t(key("removeConfirm"), { source: source.label })}
-                    </span>
-                    <Button
-                      onClick={() => {
-                        setPendingRemove(null);
-                        void handleRemove(source);
-                      }}
-                      disabled={removing !== null}
-                      variant="primary"
-                      size="sm"
-                    >
-                      {t(key("removeConfirmYes"))}
-                    </Button>
-                    <Button
-                      onClick={() => setPendingRemove(null)}
-                      disabled={removing !== null}
-                      variant="secondary"
-                      size="sm"
-                    >
-                      {t(key("cancel"))}
-                    </Button>
-                  </span>
-                ) : (
-                  <Button
-                    onClick={() => setPendingRemove(source.id)}
-                    disabled={rowBusy}
-                    variant="secondary"
-                    size="sm"
-                    aria-label={t(key("remove"))}
-                  >
-                    {removing === source.id
-                      ? t(key("removing"))
-                      : t(key("remove"))}
-                  </Button>
-                )}
-              </>
+              </span>
             ) : (
               <Button
-                onClick={() => openDialog(source)}
-                disabled={rowBusy}
-                variant={isInstalled ? "secondary" : "primary"}
+                onClick={() => setPendingRemove(sourceKey)}
+                disabled={busy}
+                variant="secondary"
                 size="sm"
+                aria-label={t(key("remove"))}
               >
-                {isInstalled ? t(key("update")) : t(key("import"))}
+                {removing === sourceKey
+                  ? t(key("removing"))
+                  : t(key("remove"))}
               </Button>
             )}
           </div>
@@ -374,7 +531,7 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
           )}
           {!collapsed && (
             <div className="space-y-1">
-              {groupSources.map((s) => renderRow(s, false))}
+              {groupSources.map((s) => renderRow(s))}
             </div>
           )}
         </div>
@@ -394,6 +551,7 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
         <div className="w-full max-w-md space-y-3">
           {loadError && (
             <div className="space-y-1">
+              <p className="text-xs text-red-400">{t(key("loadFailed"))}</p>
               <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-mid-gray/20 bg-black/10 p-2 text-xs text-red-400 select-text">
                 {loadError}
               </pre>
@@ -408,6 +566,21 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
             </div>
           )}
 
+          {/* 已安装来源：以 settings.imported_lexicons 为准全量渲染，
+              目录加载失败也照常展示（可切模式/移除）。 */}
+          <div className="space-y-1">
+            <p className="text-sm font-medium">
+              {t(key("installedTitle"), { count: installedRows.length })}
+            </p>
+            {installedRows.length > 0 ? (
+              installedRows.map(renderInstalledRow)
+            ) : (
+              <p className="text-xs text-mid-gray">
+                {t(key("installedEmpty"))}
+              </p>
+            )}
+          </div>
+
           {sources === null && !loadError && (
             <p className="text-xs text-mid-gray">{t(key("loading"))}</p>
           )}
@@ -418,19 +591,11 @@ export const LexiconSources: React.FC<LexiconSourcesProps> = React.memo(
 
           {sources !== null && (
             <>
-              {installedManaged.length > 0 && (
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">
-                    {t(key("installedTitle"))}
-                  </p>
-                  {installedManaged.map((s) => renderRow(s, true))}
-                </div>
-              )}
               {MANAGED_GROUPS.map((g) => renderGroup(g))}
               {unknownGroupSources.length > 0 && (
                 <div className="space-y-1">
                   <p className="text-sm font-medium">{t(key("groupOther"))}</p>
-                  {unknownGroupSources.map((s) => renderRow(s, false))}
+                  {unknownGroupSources.map((s) => renderRow(s))}
                 </div>
               )}
               <p className="text-xs text-mid-gray">{t(key("thuoclHint"))}</p>
