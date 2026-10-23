@@ -21,8 +21,8 @@
 use crate::audio_toolkit::chinese_hotwords::{self, ConfusionOptions};
 use std::collections::HashSet;
 
-/// 注入词表的最多条数。
-const MAX_INJECTED_ENTRIES: usize = 16;
+/// 注入词表的最多条数（速度优先的默认值：控制输入 token 规模）。
+const MAX_INJECTED_ENTRIES: usize = 8;
 /// 注入词条行的总字符预算（Unicode 标量数，含换行分隔，不含护栏说明）。
 const MAX_INJECTED_CHARS: usize = 512;
 /// 单个词条（primary）超过此码点数整行跳过（防 prompt 膨胀，与
@@ -292,30 +292,31 @@ mod tests {
         assert!(block.contains("- Rust语言 是用户词表中的正确写法"));
     }
 
-    /// 条数预算：候选多于 16 条时按“越短越靠前”截到 16 条。
+    /// 条数预算：候选多于 8 条时按“越短越靠前”截到 8 条。
     #[test]
-    fn entry_cap_is_16() {
+    fn entry_cap_is_8() {
         let words: Vec<String> = (1..=20).map(|i| format!("aa{i:02}")).collect();
         let draft = words.join(" ");
         let block = vocabulary_block(&words, &draft, THRESHOLD, false).unwrap();
         let entries = entry_lines(&block);
-        assert_eq!(entries.len(), 16);
+        assert_eq!(entries.len(), 8);
         assert!(block.contains("- aa01 是用户词表中的正确写法"));
-        assert!(block.contains("- aa16 是用户词表中的正确写法"));
-        assert!(!block.contains("aa17"));
+        assert!(block.contains("- aa08 是用户词表中的正确写法"));
+        assert!(!block.contains("aa09"));
     }
 
     /// 字符预算：词条行总计（含换行分隔）不超过 512，装不下即止。
-    /// 每行 50 字符：10 行 = 10×50 + 9 = 509 ≤ 512，11 行 = 559 > 512。
+    /// 每行 78 字符（64 码点词 + 格式前后缀）：6 行 = 6×78 + 5 = 473 ≤
+    /// 512，7 行 = 552 > 512 → 预算先于 8 条上限生效。
     #[test]
     fn char_budget_is_512() {
         let words: Vec<String> = (0..16)
-            .map(|i| format!("{i:02}{}", "x".repeat(34)))
+            .map(|i| format!("{i:02}{}", "x".repeat(62)))
             .collect();
         let draft = words.join(" ");
         let block = vocabulary_block(&words, &draft, THRESHOLD, false).unwrap();
         let entries = entry_lines(&block);
-        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.len(), 6);
         let total: usize =
             entries.iter().map(|l| l.chars().count()).sum::<usize>() + entries.len() - 1;
         assert!(total <= 512);

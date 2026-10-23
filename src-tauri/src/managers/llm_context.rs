@@ -8,7 +8,7 @@
 //!   `post_process_context_enabled` 均为真时才采集；任一为假**完全不
 //!   采集**（不触碰任何平台 API）。
 //! - L1：焦点 App 短标识（[`paste_target::capture_app_identity`]），
-//!   不含窗口标题。L2：游标前 ≤128 字符。Windows 走 UIA：
+//!   不含窗口标题。L2：游标前 ≤64 字符。Windows 走 UIA：
 //!   TextPattern2 的 `GetCaretRange` 优先，退回 TextPattern 的
 //!   `GetSelection` 首个 range；只把端点前移后限量 `GetText`，绝不读
 //!   整篇文档；Chromium/Electron 常见只暴露 ValuePattern 无
@@ -25,8 +25,9 @@
 use crate::settings::AppSettings;
 use std::sync::{Mutex, MutexGuard};
 
-/// 游标前文本的采集与注入上限（Unicode 标量数）。
-pub(crate) const MAX_TEXT_BEFORE_CURSOR_CHARS: usize = 128;
+/// 游标前文本的采集与注入上限（Unicode 标量数；速度优先的默认值：
+/// 控制随请求发送的输入 token 规模）。
+pub(crate) const MAX_TEXT_BEFORE_CURSOR_CHARS: usize = 64;
 
 /// 一次录音的聚焦上下文快照。两项都是"拿不到即 None"；存入前已清洗。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,9 +598,9 @@ mod tests {
         );
     }
 
-    /// 截取 128 字符：超长截尾，只保留最靠近光标的上限字符。
+    /// 截取 64 字符：超长截尾，只保留最靠近光标的上限字符。
     #[test]
-    fn text_sanitizer_truncates_to_128_closest_to_caret() {
+    fn text_sanitizer_truncates_to_64_closest_to_caret() {
         let raw: String = std::iter::repeat('字').take(300).collect();
         let cut = sanitize_text_before_cursor(&raw).unwrap();
         assert_eq!(cut.chars().count(), MAX_TEXT_BEFORE_CURSOR_CHARS);

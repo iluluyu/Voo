@@ -943,6 +943,48 @@ pub fn set_lexicon_term_mode(app: AppHandle, term: String, mode: String) -> Resu
     Ok(())
 }
 
+/// 设置一个已安装词库来源的三档生效模式（`candidate` / `active_exact` /
+/// `active_fuzzy`，大小写不敏感）。
+///
+/// 来源级档位作用于该源全部词条（单条 `lexicon_term_modes` override 仍
+/// 优先）；`blocked` 不是来源级档位——想整源停用应直接移除来源。未安装
+/// 的来源返回 Err，绝不静默建档。落盘走 `try_write_settings`（失败回滚
+/// store 内存值），成功后广播 `settings-changed` 让前端重拉。
+#[tauri::command]
+#[specta::specta]
+pub fn set_lexicon_source_mode(app: AppHandle, source: String, mode: String) -> Result<(), String> {
+    let source = source.trim().to_string();
+    if source.is_empty() {
+        return Err("source: must be non-empty after trim".to_string());
+    }
+    let mode = settings::TermMode::from_str_name(&mode).ok_or_else(|| {
+        format!("unknown source mode '{mode}': expected candidate | active_exact | active_fuzzy")
+    })?;
+    if matches!(mode, settings::TermMode::Blocked) {
+        return Err(
+            "source-level mode does not support 'blocked': remove the source instead".to_string(),
+        );
+    }
+
+    let previous = settings::get_settings(&app);
+    if !previous.imported_lexicons.contains_key(&source) {
+        return Err(format!("source '{source}' is not installed"));
+    }
+    let mut updated = previous.clone();
+    updated.lexicon_source_modes.insert(source, mode);
+    // 落盘失败：恢复 store 内存中的旧值，避免运行态与磁盘不一致。
+    if let Err(err) = settings::try_write_settings(&app, &updated) {
+        settings::write_settings(&app, previous);
+        return Err(err);
+    }
+
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "setting": "lexicon_source_modes" }),
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 「记住这条修正」：历史条目 → 自定义热词
 // ---------------------------------------------------------------------------

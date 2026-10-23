@@ -68,6 +68,23 @@ impl GgufValue {
         }
     }
 
+    /// Interpret the value as an unsigned integer, accepting any of the
+    /// integer storage types GGUF defines (e.g. `general.file_type`, which
+    /// producers store as u32 but nothing stops them writing as u16/u64).
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            GgufValue::U8(v) => Some(*v as u64),
+            GgufValue::I8(v) => u64::try_from(*v).ok(),
+            GgufValue::U16(v) => Some(*v as u64),
+            GgufValue::I16(v) => u64::try_from(*v).ok(),
+            GgufValue::U32(v) => Some(*v as u64),
+            GgufValue::I32(v) => u64::try_from(*v).ok(),
+            GgufValue::U64(v) => Some(*v),
+            GgufValue::I64(v) => u64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
     /// Interpret the value as a bool. GGUF stores bools as a single byte; some
     /// producers use a small integer type instead, so accept those too.
     pub fn as_bool(&self) -> Option<bool> {

@@ -73,6 +73,11 @@ const MAX_ACCEPTED_PER_RUN: usize = 20;
 /// Candidate 存储上限（超出按 created_at 淘汰最旧）。
 const MAX_STORED_CANDIDATES: usize = 100;
 
+/// 整理请求的输出 token 预算：输出是候选数组，比听写后处理的统一
+/// 512 上限更宽，避免候选列表被截断（旧版聊天端点不设上限，这是最接
+/// 近的保守值）。
+const CURATION_MAX_OUTPUT_TOKENS: u32 = 4096;
+
 /// 整理请求的 system prompt：只允许从给定编号文本里提取术语。
 const CURATION_SYSTEM_PROMPT: &str = "你是中文语音输入的个人词库整理助手。用户会提供按序号编号的历史转写文本片段（每条已截断）。请只从这些给定文本中提取频繁出现且容易被语音识别写错的专有名词、领域术语、产品名、品牌、人名与缩写（含中英混排，如软件名、型号、项目代号）；通用日常用语、语法词、单字、纯数字一律不要。每个入选词输出：term（必须逐字来自给定文本，不得改写、翻译、合并或编造）、aliases（同一事物的其他常见写法，最多 3 个，可为空数组）、evidence（从给定文本中逐字摘录的、包含该词的短片段）、reason（一句话中文说明它为什么值得加入个人热词库）。只输出 JSON 数组，不要任何其他文本。";
 
@@ -620,8 +625,9 @@ async fn run_curation(app: &AppHandle) -> Result<String, String> {
         .get(&provider.id)
         .cloned()
         .unwrap_or_default();
-    // 与后处理链路一致：这两家关掉推理更稳，其他端点用默认请求。
-    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+    // 思考档位与后处理共用同一设置（默认 none：整理是后台任务，不值得
+    // 为它付出推理延迟）。
+    let thinking = settings.post_process_thinking;
 
     let outcome = crate::llm_client::send_chat_completion_with_schema(
         &provider,
@@ -630,7 +636,8 @@ async fn run_curation(app: &AppHandle) -> Result<String, String> {
         corpus.text.clone(),
         Some(CURATION_SYSTEM_PROMPT.to_string()),
         Some(output_schema()),
-        disable_reasoning,
+        thinking,
+        CURATION_MAX_OUTPUT_TOKENS,
     )
     .await;
 

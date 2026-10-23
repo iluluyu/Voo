@@ -436,6 +436,22 @@ async removeImportedLexicon(source: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * 设置一个已安装词库来源的三档生效模式（`candidate` / `active_exact` /
+ * `active_fuzzy`，大小写不敏感）。
+ *
+ * 来源级档位作用于该源全部词条（单条 override 仍优先）；`blocked`
+ * 不是来源级档位，想整源停用应直接移除。未安装的来源报错，避免
+ * 静默建档。写入后广播 `settings-changed` 让前端设置存储重新拉取。
+ */
+async setLexiconSourceMode(source: string, mode: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_lexicon_source_mode", { source, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 预置开源词库源目录（只读；已安装状态由前端按 `imported_lexicons` 合并）。
  */
 async listLexiconSources() : Promise<LexiconSourceInfo[]> {
@@ -483,6 +499,17 @@ async properNounsLexiconVersion() : Promise<Result<ProperNounsVersionInfo, strin
 async previewLexiconCuration() : Promise<Result<LexiconCandidate[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("preview_lexicon_curation") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 只读：统一词库解析器批量查询词条裁决（规范写法/档位/来源归属）。
+ */
+async lookupLexiconTerms(terms: string[]) : Promise<Result<LexiconResolution[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("lookup_lexicon_terms", { terms }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -899,6 +926,42 @@ async setActiveModel(modelId: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Validate and copy a local GGUF into the models directory.
+ *
+ * Requires a `.gguf` extension and a valid GGUF magic; an existing file of the
+ * same name is never overwritten (numeric `-2`/`-3`… suffix instead).
+ */
+async importModelFile(path: string) : Promise<Result<ImportedModel, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_model_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Download an `https://` GGUF into the models directory.
+ *
+ * Streams into `{name}.partial` with 60 s connect/stall timeouts and an
+ * 8 GiB cap; on completion the optional `expectedSha256` (hex) and the GGUF
+ * magic are verified before an atomic rename. Any failure removes the partial.
+ */
+async importModelUrl(url: string, expectedSha256: string | null) : Promise<Result<ImportedModel, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_model_url", { url, expectedSha256 }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Header-only compatibility report for a GGUF file. Never fails: an
+ * unreadable or non-GGUF file is reported through `blocked`.
+ */
+async checkModelCompat(path: string) : Promise<ModelCompat> {
+    return await TAURI_INVOKE("check_model_compat", { path });
+},
 async getCurrentModel() : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_current_model") };
@@ -1242,6 +1305,15 @@ selected_channel?: number | null; clamshell_microphone?: string | null; selected
  */
 imported_lexicons?: Partial<{ [key in string]: string[] }>;
 /**
+ * 热词四态档位 override 表：key = 解析后的替换目标（primary），显式
+ * override 优先于来源缺省；缺省由来源决定（手工词近音、导入词仅建议）。
+ */
+lexicon_term_modes?: Partial<{ [key in string]: TermMode }>;
+/**
+ * 来源级模式：来源名 → 该源全部词条的档位（单条 override 优先于它）。
+ */
+lexicon_source_modes?: Partial<{ [key in string]: TermMode }>;
+/**
  * 中文热词规则文本（每行 `模式=替换` 字面量或 `模式=>替换` 正则）
  */
 hotword_rules?: string; 
@@ -1338,6 +1410,7 @@ export type ImplementationChangeResult = { success: boolean;
  * List of binding IDs that were reset to defaults due to incompatibility
  */
 reset_bindings: string[] }
+export type ImportedModel = { id: string; filename: string; size_bytes: number }
 export type KeyboardDiagnosticReport = { secure_input_enabled: boolean; culprit_pid: number | null; culprit_name: string | null; 
 /**
  * Counts only — key identity is deliberately never captured.
@@ -1373,6 +1446,34 @@ export type LexiconSample = { word: string; weight: number | null }
 export type LexiconScope = "all" | "latin_only" | "han_only"
 export type LexiconSourceFormat = "rime_dict_yaml" | "essay_tsv" | "thuocl_tsv"
 export type LexiconSourceGroup = "proper_nouns" | "domain_han" | "frequency_baseline" | "thuocl"
+export type LexiconWinningRule = "term_override" | "user_word" | "public_source" | "ambiguous" | "unknown"
+/**
+ * 一条词条查询的完整裁决（统一词库解析器）。
+ */
+export type LexiconResolution = { 
+    /**
+     * 查询词（trim 后原样返回）
+     */
+    term: string; 
+    /**
+     * 规范写法（替换目标 primary）；null = 未收录或写法冲突保持歧义
+     */
+    canonical: string | null; 
+    effective_mode: TermMode; 
+    winning_rule: LexiconWinningRule; 
+    /**
+     * 贡献来源 id（custom_words 或 imported_lexicons 的来源键）
+     */
+    contributing_sources: string[]; 
+    /**
+     * 被压制来源 id（更高权威胜出 / 写法不一致 / 来源已关）
+     */
+    suppressed_sources: string[]; 
+    /**
+     * 人读解释（含来源 id）
+     */
+    explanation: string }
+export type TermMode = "candidate" | "active_exact" | "active_fuzzy" | "blocked"
 /**
  * 一个预置源。
  */
@@ -1407,6 +1508,7 @@ export type LexiconSourceInfo = {
 }
 export type LLMPrompt = { id: string; name: string; prompt: string }
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error"
+export type ModelCompat = { architecture: string; quant: string; vocab_size: number; has_tokenizer: boolean; backend_supported: boolean; blocked: string[]; warnings: string[] }
 export type ModelInfo = { id: string; name: string; description: string; filename: string; source: ModelSource; size_mb: number; is_downloaded: boolean; is_downloading: boolean; partial_size: number; accuracy_score: number; speed_score: number; supports_translation: boolean; is_recommended: boolean; supported_languages: string[]; supports_language_selection: boolean; is_custom: boolean; supports_streaming: boolean; supports_language_detection: boolean }
 export type ModelLoadStatus = { is_loaded: boolean; current_model: string | null }
 /**

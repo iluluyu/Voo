@@ -312,10 +312,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         provider.id, model
     );
 
-    // Ask these providers to skip reasoning/thinking — post-processing rarely
-    // benefits from it and it adds seconds of latency. llm_client picks the
-    // field the endpoint understands and retries without it if rejected.
-    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+    // 思考档位（默认 none：后处理很少受益于推理，而推理会显著增加延
+    // 迟）。llm_client 按服务商能力把档位映射成最近支持的请求字段，
+    // 字段被拒时自动降级重发（见 chat_reasoning_params）。
+    let thinking = settings.post_process_thinking;
 
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
@@ -395,7 +395,8 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             user_content,
             Some(system_prompt),
             Some(json_schema),
-            disable_reasoning,
+            thinking,
+            crate::llm_client::POST_PROCESS_MAX_TOKENS,
         )
         .await
         {
@@ -468,7 +469,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         api_key,
         &model,
         processed_prompt,
-        disable_reasoning,
+        thinking,
     )
     .await;
 
@@ -910,11 +911,19 @@ impl ShortcutAction for TranscribeAction {
                                             return;
                                         }
 
-                                        match utils::paste(final_text, ah_clone.clone()) {
+                                        match utils::paste(final_text.clone(), ah_clone.clone()) {
                                             Ok(()) => {
                                                 debug!(
                                                     "Text pasted successfully in {:?}",
                                                     paste_time.elapsed()
+                                                );
+                                                // 一次性整段粘贴（增量上屏会话不走这条
+                                                // 线程），whole_paste 恒为 true。内部自行
+                                                // 起线程采集，不阻塞本粘贴线程。
+                                                crate::managers::learn_capture::spawn_after_paste(
+                                                    &ah_clone,
+                                                    &final_text,
+                                                    true,
                                                 );
                                             }
                                             Err(e) => {
@@ -1048,7 +1057,8 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 mod tests {
     use super::{
         complete_unless_cancelled, effective_post_process, is_blank_transcription,
-        legacy_llm_response_to_output, should_use_streaming_overlay, strip_think_block,
+        legacy_llm_response_to_output, post_process_transcription, should_use_streaming_overlay,
+        strip_think_block,
     };
     use crate::settings::{get_default_settings, AppSettings, OverlayStyle, PostProcessMode};
     use std::future;
@@ -1066,6 +1076,31 @@ mod tests {
         settings.post_process_selected_prompt_id =
             Some("default_improve_transcriptions".to_string());
         settings
+    }
+
+    #[tokio::test]
+    async fn post_process_llm_failure_falls_back_to_none_silently() {
+        let mut settings = seamless_test_settings();
+        settings.post_process_provider_id = "custom".to_string();
+        settings
+            .post_process_api_keys
+            .insert("custom".to_string(), "key".to_string());
+        settings
+            .post_process_models
+            .insert("custom".to_string(), "test-model".to_string());
+        // 无监听的端口：请求立刻失败（connection refused），后处理必须折
+        // 叠为 None = 保留原文，且不向用户报错（超时/传输错误同一口径）。
+        settings
+            .post_process_providers
+            .iter_mut()
+            .find(|provider| provider.id == "custom")
+            .unwrap()
+            .base_url = "http://127.0.0.1:9".to_string();
+
+        assert_eq!(
+            post_process_transcription(&settings, "原始转写").await,
+            None
+        );
     }
 
     /// 开关为真、配置齐全、模式 `always`（默认）→ 普通听写路径

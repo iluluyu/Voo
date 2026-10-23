@@ -361,6 +361,22 @@ pub enum PostProcessMode {
     SeparateBinding,
 }
 
+/// LLM 后处理的思考（推理）档位。默认 [`ThinkingLevel::None`]：后处理是
+/// 短文本改写，推理收益小而延迟代价大。各服务商能力不同，llm_client
+/// 按最近支持档映射（缺档一律**向下**取，向上取档会显著增加延迟）：
+/// DeepSeek 走 `reasoning_effort`（none/low/low/high），OpenAI 兼容走
+/// `reasoning_effort`（None 档=不发送该字段），Anthropic 走
+/// `thinking.budget_tokens`（1024/2048/4096）。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Clone, Serialize, Deserialize, Type)]
 #[serde(transparent)]
 pub(crate) struct SecretMap(HashMap<String, String>);
@@ -530,8 +546,12 @@ pub struct AppSettings {
     /// `separate` 仅专用快捷键动作走后处理。
     #[serde(default)]
     pub post_process_mode: PostProcessMode,
+    /// 后处理思考档位：`none`（默认，最快）/`low`/`medium`/`high`。
+    /// 服务商映射见 [`ThinkingLevel`]。
+    #[serde(default)]
+    pub post_process_thinking: ThinkingLevel,
     /// LLM 后处理的聚焦上下文注入：录音开始前（overlay 显示前）一次性
-    /// 采集前台 App 标识与（Windows/macOS 可行时）游标前 ≤128 字符，作
+    /// 采集前台 App 标识与（Windows/macOS 可行时）游标前 ≤64 字符，作
     /// 为单独标注的不可信数据字段发给所配置的 LLM 服务商。仅在
     /// `post_process_enabled` 为真时生效；拿不到任何一项静默跳过。
     #[serde(default = "default_post_process_context_enabled")]
@@ -1419,6 +1439,7 @@ pub fn get_default_settings() -> AppSettings {
         auto_submit_key: AutoSubmitKey::default(),
         post_process_enabled: default_post_process_enabled(),
         post_process_mode: PostProcessMode::default(),
+        post_process_thinking: ThinkingLevel::default(),
         post_process_context_enabled: default_post_process_context_enabled(),
         post_process_provider_id: default_post_process_provider_id(),
         post_process_providers: default_post_process_providers(),
