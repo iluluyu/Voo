@@ -248,6 +248,22 @@ async changePostProcessEnabledSetting(enabled: boolean) : Promise<Result<null, s
     else return { status: "error", error: e  as any };
 }
 },
+async changePostProcessModeSetting(mode: PostProcessMode) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_post_process_mode_setting", { mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changePostProcessContextEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_post_process_context_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeExperimentalEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_experimental_enabled_setting", { enabled }) };
@@ -345,6 +361,24 @@ async updateCustomWords(words: string[]) : Promise<Result<null, string>> {
 }
 },
 /**
+ * 把历史里的一次纠错沉淀成自定义热词（`正确 | 错误`，错误写法可省略）。
+ * 
+ * 词段在后台重新校验（trim 后 2–50 字、不含换行/`|`/`~~~`），不信任
+ * 前端。与现有 `custom_words` 完全相同的条目不重复写入，返回
+ * `Ok(false)`；追加成功返回 `Ok(true)`。保存走 `try_write_settings`
+ * （序列化/落盘失败返回 Err 并把旧值写回 store 内存，绝不静默成功），
+ * 成功后广播 `settings-changed` 让前端设置存储重新拉取。引擎词表与
+ * 中文热词索引每次转写都会重读 `custom_words`，无需额外刷新。
+ */
+async suggestCorrectionToHotword(correct: string, wrong: string | null) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("suggest_correction_to_hotword", { correct, wrong }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 下载并解析一个 THUOCL 分类词库。
  * 
  * 数据格式为每行 `词\t词频DF`。过滤条件：纯汉字、3–50 字；
@@ -353,6 +387,102 @@ async updateCustomWords(words: string[]) : Promise<Result<null, string>> {
 async importThuoclLexicon(category: string) : Promise<Result<string[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_thuocl_lexicon", { category }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 从本地文件导入一个 THUOCL 分类词库（离线兜底）。
+ *
+ * 网络完全不可达时，用户可以用浏览器/下载工具拿到 `THUOCL_<分类>.txt`，
+ * 再用这个命令导入。校验与网络路径完全一致（同一 `parse_thuocl_lexicon`
+ * + 同一体积上限），因此两条路径的词表质量相同。
+ */
+async importThuoclLexiconFile(category: string, path: string) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_thuocl_lexicon_file", { category, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 保存/更新一个导入词库来源的词快照。
+ *
+ * 仅接受 THUOCL 分类作为来源名；词表在后台重新验证（纯汉字 3–50 字、
+ * 非空、单来源 5000 上限），不信任前端预览结果。只写
+ * `imported_lexicons`，手工词（`custom_words`）不受影响。写入后广播
+ * `settings-changed` 让前端设置存储重新拉取。
+ */
+async setImportedLexicon(source: string, words: string[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_imported_lexicon", { source, words }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 移除一个导入词库来源（只删该来源的快照；手工词不受影响）。
+ * 未安装的来源报错，避免静默成功。
+ */
+async removeImportedLexicon(source: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_imported_lexicon", { source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 预置开源词库源目录（只读；已安装状态由前端按 `imported_lexicons` 合并）。
+ */
+async listLexiconSources() : Promise<LexiconSourceInfo[]> {
+    return TAURI_INVOKE("list_lexicon_sources");
+},
+/**
+ * 预览一个开源词库源（拉取 + 解析 + 过滤；不写设置）。
+ *
+ * 每源独立调用；没有批量入口。`limit` ∈ {500,1000,2000,5000}，默认
+ * 2000。非词典文件（错误页/README）在解析层被拒。
+ */
+async previewOpenLexiconSource(id: string, scope: LexiconScope | null, limit: number | null) : Promise<Result<OpenLexiconPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_open_lexicon_source", { id, scope, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 确认导入一个源（用户在预览后点确认才调用；写设置 + 广播）。
+ */
+async confirmOpenLexiconSource(id: string, words: string[]) : Promise<Result<OpenLexiconConfirmResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("confirm_open_lexicon_source", { id, words }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 只读：返回内置专名种子版本/条数与当前生效规则数。
+ */
+async properNounsLexiconVersion() : Promise<Result<ProperNounsVersionInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("proper_nouns_lexicon_version") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 只读预览当前词库整理候选（Candidate 态，未激活、不影响纠错）。
+ */
+async previewLexiconCuration() : Promise<Result<LexiconCandidate[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_lexicon_curation") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -389,6 +519,14 @@ async changeMuteWhileRecordingSetting(enabled: boolean) : Promise<Result<null, s
     else return { status: "error", error: e  as any };
 }
 },
+async changeDecodeVocabularyBiasSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_decode_vocabulary_bias_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeAppendTrailingSpaceSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_append_trailing_space_setting", { enabled }) };
@@ -397,9 +535,25 @@ async changeAppendTrailingSpaceSetting(enabled: boolean) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
+async changeIncrementalCommitSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_incremental_commit_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeLazyStreamCloseSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_lazy_stream_close_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeInputLevelNormalizationSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_input_level_normalization_setting", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -983,6 +1137,40 @@ async isLaptop() : Promise<Result<boolean, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getRecentTermCandidates(days: number) : Promise<Result<Candidate[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_recent_term_candidates", { days }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 只读预览当前学习到的纠错候选（Candidate 态：按最近出现时间倒序）。
+ * 只写 <data_dir>/learned_corrections.json，不写 custom_words、不影响任何
+ * 纠错行为。
+ */
+async previewLearnedCandidates() : Promise<Result<LearnedCandidate[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_learned_candidates") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * 撤销已学习的候选：删除所有原词为 wrong 的候选，并把对应 (wrong→corrected)
+ * 词对加入 blocked 集合持久化，之后同一对不再被学习。返回被撤销的条数；
+ * 0 表示没有匹配的候选（不新增 blocked 条目）。
+ */
+async undoLearnedCandidate(wrong: string) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("undo_learned_candidate", { wrong }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1047,6 +1235,13 @@ whats_new_last_seen_version?: string; selected_model?: string; onboarding_comple
  */
 selected_channel?: number | null; clamshell_microphone?: string | null; selected_output_device?: string | null; translate_to_english?: boolean; selected_language?: string; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; custom_words?: string[]; 
 /**
+ * 分类词库导入来源 → 该来源保存的词快照。`custom_words` 始终只存
+ * 手工词；生效热词表由 `effective_custom_words`
+ * 合并得出。旧版本导入的词无法可靠溯源，仍留在 `custom_words`
+ * 里按手工词对待（保持不动）。
+ */
+imported_lexicons?: Partial<{ [key in string]: string[] }>;
+/**
  * 中文热词规则文本（每行 `模式=替换` 字面量或 `模式=>替换` 正则）
  */
 hotword_rules?: string; 
@@ -1057,7 +1252,32 @@ hotword_pinyin_threshold?: number;
 /**
  * 启用方言混淆（n/l、f/h 声母）
  */
-hotword_dialect_confusion?: boolean; model_unload_timeout?: ModelUnloadTimeout; word_correction_threshold?: number; history_limit?: number; recording_retention_period?: RecordingRetentionPeriod; paste_method?: PasteMethod; clipboard_handling?: ClipboardHandling; auto_submit?: boolean; auto_submit_key?: AutoSubmitKey; post_process_enabled?: boolean; post_process_provider_id?: string; post_process_providers?: PostProcessProvider[]; post_process_api_keys?: SecretMap; post_process_models?: Partial<{ [key in string]: string }>; post_process_prompts?: LLMPrompt[]; post_process_selected_prompt_id?: string | null; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; paste_delay_ms?: number; paste_delay_after_ms?: number; 
+hotword_dialect_confusion?: boolean; model_unload_timeout?: ModelUnloadTimeout; word_correction_threshold?: number; 
+/**
+ * 粘贴后修改学习：一次性粘贴完成后延迟读取目标输入框（仅
+ * Windows/macOS 可读时），两次读取稳定且贴出的词被改掉时学成
+ * Candidate（绝不写 `custom_words`）。默认开；任何一步拿不到读取
+ * 都静默跳过。增量上屏（一贴多段）的会话不学。
+ */
+learn_from_corrections_enabled?: boolean; history_limit?: number; recording_retention_period?: RecordingRetentionPeriod; paste_method?: PasteMethod; clipboard_handling?: ClipboardHandling; auto_submit?: boolean; auto_submit_key?: AutoSubmitKey; post_process_enabled?: boolean; 
+/**
+ * 后处理触发模式：`always`（默认）普通听写自动后处理；
+ * `separate` 仅专用快捷键动作走后处理。
+ */
+post_process_mode?: PostProcessMode; 
+/**
+ * LLM 后处理的聚焦上下文注入：录音开始前（overlay 显示前）一次性
+ * 采集前台 App 标识与（Windows/macOS 可行时）游标前 ≤128 字符，作
+ * 为单独标注的不可信数据字段发给所配置的 LLM 服务商。仅在
+ * `post_process_enabled` 为真时生效；拿不到任何一项静默跳过。
+ */
+post_process_context_enabled?: boolean; post_process_provider_id?: string; post_process_providers?: PostProcessProvider[]; post_process_api_keys?: SecretMap; post_process_models?: Partial<{ [key in string]: string }>; post_process_prompts?: LLMPrompt[]; post_process_selected_prompt_id?: string | null;
+/**
+ * AI 定时整理词库：满足触发条件（历史每新增 200 条或距上次 ≥ 7 天）
+ * 时后台跑一次整理（至多一次 LLM 请求）。默认开；与后处理共用
+ * 服务商配置，未配置时不发起任何请求。见 managers/lexicon_curation.rs。
+ */
+post_process_lexicon_curation_enabled?: boolean; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; paste_delay_ms?: number; paste_delay_after_ms?: number; 
 /**
  * Debug-gated ("beta") receipt-sequenced paste: restore the clipboard only
  * after the target app actually reads the transcript, instead of after a
@@ -1074,7 +1294,7 @@ chinese_script?: ChineseScript; transcribe_accelerator?: TranscribeAcceleratorSe
  * `device_id` when available (or its name for backends such as Metal),
  * never from the process-local device registry index.
  */
-transcribe_gpu_device?: string | null; extra_recording_buffer_ms?: number; vad_enabled?: boolean; 
+transcribe_gpu_device?: string | null; extra_recording_buffer_ms?: number; vad_enabled?: boolean; input_level_normalization?: boolean; incremental_commit?: boolean; decode_vocabulary_bias?: boolean;
 /**
  * Experimental detector implementation. Silero remains the stable default.
  */
@@ -1095,6 +1315,7 @@ export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AutoSubmitKey = "enter" | "ctrl_enter" | "cmd_enter"
 export type AvailableAccelerators = { transcribe: string[]; gpu_devices: GpuDeviceOption[] }
 export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null }
+export type Candidate = { term: string; count: number; docs: number; sample: string; score: number }
 /**
  * Script applied to Mandarin and Cantonese output. Other languages are never
  * converted.
@@ -1123,6 +1344,67 @@ export type KeyboardDiagnosticReport = { secure_input_enabled: boolean; culprit_
  */
 key_down: number; key_up: number; flags_changed: number; mouse: number; duration_ms: number }
 export type KeyboardImplementation = "tauri" | "handy_keys"
+/**
+ * 一条学到的纠错候选（Candidate 态，未激活、不参与任何纠错）。
+ */
+export type LearnedCandidate = { 
+/**
+ * 原词（贴出去后被改掉的中间差异段）
+ */
+wrong: string; 
+/**
+ * 新词（用户改成的中间差异段）
+ */
+corrected: string; 
+/**
+ * 同一对被观察到的次数（重复出现累加）
+ */
+count: number; 
+/**
+ * 首次学到该对的时间（Unix 毫秒）
+ */
+first_seen: number; 
+/**
+ * 最近一次观察到该对的时间（Unix 毫秒）
+ */
+last_seen: number }
+export type LexiconCandidate = { term: string; aliases: string[]; evidence: string; count: number; created_at: number }
+export type LexiconSample = { word: string; weight: number | null }
+export type LexiconScope = "all" | "latin_only" | "han_only"
+export type LexiconSourceFormat = "rime_dict_yaml" | "essay_tsv" | "thuocl_tsv"
+export type LexiconSourceGroup = "proper_nouns" | "domain_han" | "frequency_baseline" | "thuocl"
+/**
+ * 一个预置源。
+ */
+export type LexiconSourceInfo = { 
+    /**
+     * 稳定 id（也是 `imported_lexicons` 的存储键；THUOCL 为
+     * `thuocl-<category>`，存储键是裸分类名）。
+     */
+    id: string; 
+    /**
+     * 展示名（如 `zhwiki`、`rime-ice/en`）。
+     */
+    label: string; 
+    group: LexiconSourceGroup; 
+    /**
+     * 用途一句话。
+     */
+    description: string; 
+    /**
+     * 许可（含署名要求）。
+     */
+    license: string; 
+    /**
+     * 是否推荐（A 组推荐；rime-essay 为 false）。
+     */
+    recommended: boolean; 
+    format: LexiconSourceFormat; 
+    /**
+     * 上游主页/发布页（网络失败时给用户的手工获取地址）。
+     */
+    source_url: string; 
+}
 export type LLMPrompt = { id: string; name: string; prompt: string }
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error"
 export type ModelInfo = { id: string; name: string; description: string; filename: string; source: ModelSource; size_mb: number; is_downloaded: boolean; is_downloading: boolean; partial_size: number; accuracy_score: number; speed_score: number; supports_translation: boolean; is_recommended: boolean; supported_languages: string[]; supports_language_selection: boolean; is_custom: boolean; supports_streaming: boolean; supports_language_detection: boolean }
@@ -1152,6 +1434,52 @@ sha256: string | null } } |
  */
 "Local"
 export type ModelUnloadTimeout = "never" | "immediately" | "min_2" | "min_5" | "min_10" | "min_15" | "hour_1" | "sec_15"
+/**
+ * 确认导入结果。
+ */
+export type OpenLexiconConfirmResult = { 
+    /**
+     * `imported_lexicons` 存储键。
+     */
+    source: string; 
+    count: number; 
+}
+/**
+ * 单源预览结果（只读；确认前不写任何设置）。
+ */
+export type OpenLexiconPreview = { 
+    id: string; 
+    label: string; 
+    license: string; 
+    /**
+     * 版本（frontmatter version / release tag+日期 / "master"）。
+     */
+    version: string; 
+    /**
+     * 实际拉取 URL（或手工获取地址）。
+     */
+    source_url: string; 
+    /**
+     * 资格 + 范围筛选 + 去重后的词条数。
+     */
+    total_unique: number; 
+    /**
+     * 常用词两级过滤丢弃数（内置常用表 + 词频头部 10%）。
+     */
+    filtered: number; 
+    /**
+     * 最终保留词条（按词频降序，≤ limit；确认导入的就是这份快照）。
+     */
+    words: string[]; 
+    /**
+     * 前 10 条样例（词 + 词频）。
+     */
+    samples: LexiconSample[]; 
+    /**
+     * C 组导入警告（其余源为 None）。
+     */
+    warning: string | null; 
+}
 export type OverlayPosition = "top" | "bottom"
 /**
  * Which recording overlay to display. `Minimal` and `Live` share one base
@@ -1177,6 +1505,26 @@ export type PostProcessApiFormat =
  */
 "anthropic"
 export type PostProcessProvider = { id: string; label: string; base_url: string; allow_base_url_edit?: boolean; models_endpoint?: string | null; supports_structured_output?: boolean; api_format?: PostProcessApiFormat }
+/**
+ * 后处理触发模式：`always`（默认）普通听写自动后处理；
+ * `separate` 仅专用快捷键动作走后处理。
+ */
+export type PostProcessMode = "always" | "separate"
+/**
+ * 内置种子 + 当前生效规则概览（只读；供将来接更新）。
+ */
+export type ProperNounsVersionInfo = { 
+    version: string; 
+    updated_at: string; 
+    /**
+     * 内置种子条数（canonical 数）。
+     */
+    entries: number; 
+    /**
+     * 当前生效的字面规则数（种子 + A 组源派生 − 用户冲突）。
+     */
+    rules: number; 
+}
 export type RecordingRetentionPeriod = "never" | "preserve_limit" | "days_3" | "weeks_2" | "months_3"
 /**
  * A retired ONNX model found on disk.

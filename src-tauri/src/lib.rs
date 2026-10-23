@@ -679,6 +679,8 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_auto_submit_setting,
             shortcut::change_auto_submit_key_setting,
             shortcut::change_post_process_enabled_setting,
+            shortcut::change_post_process_mode_setting,
+            shortcut::change_post_process_context_enabled_setting,
             shortcut::change_experimental_enabled_setting,
             shortcut::change_post_process_base_url_setting,
             shortcut::change_post_process_api_format_setting,
@@ -691,7 +693,19 @@ pub fn run(cli_args: CliArgs) {
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
             shortcut::update_custom_words,
+            shortcut::set_lexicon_term_mode,
+            shortcut::suggest_correction_to_hotword,
             shortcut::import_thuocl_lexicon,
+            shortcut::import_thuocl_lexicon_file,
+            shortcut::import_lexicon_file,
+            shortcut::set_imported_lexicon,
+            shortcut::remove_imported_lexicon,
+            managers::lexicon_sources::get_lexicon_sources,
+            managers::lexicon_sources::preview_open_lexicon_source,
+            managers::lexicon_sources::confirm_open_lexicon_source,
+            managers::lexicon_sources::proper_nouns_lexicon_version,
+            shortcut::change_proper_noun_lexicon_enabled_setting,
+            managers::lexicon_curation::preview_lexicon_curation,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
             shortcut::change_mute_while_recording_setting,
@@ -699,6 +713,9 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_lazy_stream_close_setting,
             shortcut::change_vad_enabled_setting,
             shortcut::change_long_form_chunking_setting,
+            shortcut::change_input_level_normalization_setting,
+            shortcut::change_incremental_commit_setting,
+            shortcut::change_decode_vocabulary_bias_setting,
             shortcut::change_vad_backend_setting,
             shortcut::change_filler_word_removal_enabled_setting,
             shortcut::change_chinese_script_setting,
@@ -772,6 +789,9 @@ pub fn run(cli_args: CliArgs) {
             commands::history::update_history_limit,
             commands::history::update_recording_retention_period,
             helpers::clamshell::is_laptop,
+            managers::lexicon_suggest::get_recent_term_candidates,
+            managers::learn_corrections::preview_learned_candidates,
+            managers::learn_corrections::undo_learned_candidate,
         ])
         .events(collect_events![
             managers::history::HistoryUpdatePayload,
@@ -1019,6 +1039,12 @@ pub fn run(cli_args: CliArgs) {
             // silently blocks keyed shortcuts, warns the user, and activates
             // the Carbon fallback. See secure_input.rs and issue #1578.
             secure_input::init(&app_handle);
+
+            // Lexicon curation: kick the trigger check off the startup path.
+            // `maybe_start_curation` only spawns a background task (gated by
+            // the settings toggle + throttle state, silent on failure) — it
+            // must never block startup.
+            managers::lexicon_curation::maybe_start_curation(&app_handle);
 
             // Populate the overlay-enabled cache from initial settings so the
             // audio path (overlay::emit_levels, called ~24 Hz during recording)
