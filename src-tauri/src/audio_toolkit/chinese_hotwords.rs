@@ -195,7 +195,7 @@ fn syllable_confusion(a: &str, b: &str, opts: &ConfusionOptions) -> (f64, usize)
         strip_final_g(x) == strip_final_g(y) && (x.ends_with("ng") || y.ends_with("ng"))
     };
 
-    let final_confused = if fa == fb {
+    let _final_confused = if fa == fb {
         false
     } else if nasal_pair(&fa, &fb) {
         confusions += 1;
@@ -404,19 +404,32 @@ struct Hit {
     end: usize,
     score: f64,
     hotword_idx: usize,
-    /// 参与竞争的次高分（同区间）
-    runner_up: Option<f64>,
     matched_text: String,
 }
 
+/// 一次拼音热词命中（区间基于替换后的输出文本，char 坐标）
+#[derive(Debug, Clone)]
+pub struct HotwordHit {
+    /// 输出文本中的起始 char 偏移
+    pub start: usize,
+    /// 输出文本中的结束 char 偏移（不含）
+    pub end: usize,
+    /// 被替换的原文片段
+    pub matched: String,
+    /// 替换为的热词文本
+    pub replacement: String,
+    /// 相似度
+    pub score: f64,
+}
+
 /// 对转写文本应用拼音热词替换。
-/// 返回 (新文本, 命中列表[(原文, 替换为, 相似度)])
+/// 返回 (新文本, 命中列表——区间基于新文本，供规则引擎跳过已替换区域)
 pub fn apply_pinyin_hotwords(
     text: &str,
     index: &[HotwordEntry],
     threshold: f64,
     opts: &ConfusionOptions,
-) -> (String, Vec<(String, String, f64)>) {
+) -> (String, Vec<HotwordHit>) {
     if index.is_empty() || !has_han(text) {
         return (text.to_string(), Vec::new());
     }
@@ -506,7 +519,6 @@ pub fn apply_pinyin_hotwords(
             end,
             score,
             hotword_idx,
-            runner_up,
             matched_text,
         });
     }
@@ -532,20 +544,60 @@ pub fn apply_pinyin_hotwords(
     }
     chosen.sort_by_key(|h| h.start); // 从左到右重建
 
-    // 5) 重建文本（char 级，天然 boundary 安全）
+    // 5) 重建文本（char 级，天然 boundary 安全），命中区间坐标同步换算到输出文本
     let mut out = String::with_capacity(text.len() + 16);
     let mut log = Vec::with_capacity(chosen.len());
     let mut cursor = 0usize;
     for hit in chosen {
         let hot = &index[hit.hotword_idx];
         out.push_str(&chars[cursor..hit.start].iter().collect::<String>());
+        let out_start = out.chars().count();
         out.push_str(&hot.display);
-        log.push((hit.matched_text.clone(), hot.display.clone(), hit.score));
+        let out_end = out_start + hot.display.chars().count();
+        log.push(HotwordHit {
+            start: out_start,
+            end: out_end,
+            matched: hit.matched_text.clone(),
+            replacement: hot.display.clone(),
+            score: hit.score,
+        });
         cursor = hit.end;
     }
     out.push_str(&chars[cursor..].iter().collect::<String>());
 
     (out, log)
+}
+
+/// 完整中文热词后处理：拼音模糊替换 + 规则替换。
+/// 规则只应用于未被拼音替换触碰的区域，避免对刚替换出的热词二次改写
+/// （如拼音已输出“中州韵输入法”，规则 `中州韵=中州韵输入法` 不会再叠加）。
+pub fn apply_chinese_hotwords(
+    text: &str,
+    index: &[HotwordEntry],
+    rules: &[HotwordRule],
+    threshold: f64,
+    opts: &ConfusionOptions,
+) -> (String, Vec<HotwordHit>) {
+    let (after_pinyin, hits) = apply_pinyin_hotwords(text, index, threshold, opts);
+    if rules.is_empty() {
+        return (after_pinyin, hits);
+    }
+    if hits.is_empty() {
+        return (apply_hotword_rules(&after_pinyin, rules), hits);
+    }
+    // 分段：未触碰段跑规则，已替换段原样保留
+    let out_chars: Vec<char> = after_pinyin.chars().collect();
+    let mut result = String::with_capacity(after_pinyin.len() + 16);
+    let mut cursor = 0usize;
+    for h in &hits {
+        let untouched: String = out_chars[cursor..h.start].iter().collect();
+        result.push_str(&apply_hotword_rules(&untouched, rules));
+        result.push_str(&h.replacement);
+        cursor = h.end;
+    }
+    let tail: String = out_chars[cursor..].iter().collect();
+    result.push_str(&apply_hotword_rules(&tail, rules));
+    (result, hits)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +687,7 @@ mod tests {
         build_hotword_index(&owned, 2)
     }
 
-    fn apply(text: &str, index: &[HotwordEntry]) -> (String, Vec<(String, String, f64)>) {
+    fn apply(text: &str, index: &[HotwordEntry]) -> (String, Vec<HotwordHit>) {
         apply_pinyin_hotwords(text, index, DEFAULT_THRESHOLD, &OPTS)
     }
 
@@ -743,8 +795,8 @@ mod tests {
         let (out, log) = apply("我在用中州运输入法打字", &index);
         assert_eq!(out, "我在用中州韵输入法打字");
         assert_eq!(log.len(), 1);
-        assert_eq!(log[0].1, "中州韵输入法");
-        assert!(log[0].2 > 0.999);
+        assert_eq!(log[0].replacement, "中州韵输入法");
+        assert!(log[0].score > 0.999);
     }
 
     #[test]
@@ -886,6 +938,31 @@ mod tests {
     }
 
     // ---------------- 规则 ----------------
+
+    #[test]
+    fn test_rules_do_not_double_apply_on_pinyin_hits() {
+        // 拼音替换出的热词区域不再被规则二次改写（v0.1.1 防呆）
+        let index = idx(&["中州韵输入法"]);
+        let (rules, _) = parse_hotword_rules("中州韵=中州韵输入法");
+        let (out, hits) = apply_chinese_hotwords(
+            "我在用中州运输入法打字",
+            &index,
+            &rules,
+            DEFAULT_THRESHOLD,
+            &OPTS,
+        );
+        assert_eq!(out, "我在用中州韵输入法打字");
+        assert_eq!(hits.len(), 1);
+        // 规则仍作用于未触碰区域
+        let (out2, _) = apply_chinese_hotwords(
+            "中州韵很好用",
+            &index,
+            &rules,
+            DEFAULT_THRESHOLD,
+            &OPTS,
+        );
+        assert_eq!(out2, "中州韵输入法很好用");
+    }
 
     #[test]
     fn test_parse_rules() {

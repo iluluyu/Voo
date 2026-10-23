@@ -7507,7 +7507,7 @@ dependencies = [
 
 [[package]]
 name = "voo"
-version = "0.9.8"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
