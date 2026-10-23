@@ -351,6 +351,32 @@
         "remove": "刪除 {{word}}",
         "duplicate": "「{{word}}」已存在"
       },
+      "lexiconImport": {
+        "title": "匯入詞庫（THUOCL）",
+        "description": "從清華 THUOCL 開放詞庫匯入分類詞彙。匯入時會過濾（純漢字、3–50 字）並依詞頻取前 5000 個詞，確認後附加到自訂詞彙。",
+        "fetch": "取得詞庫",
+        "fetching": "正在下載…",
+        "append": "附加到自訂詞彙",
+        "cancel": "取消",
+        "selectHint": "請先選擇至少一個分類",
+        "preview": "將附加 {{count}} 個詞",
+        "emptyResult": "沒有可附加的新詞（已過濾或全部重複）",
+        "error": "匯入失敗：{{message}}",
+        "success": "已附加 {{count}} 個詞",
+        "categories": {
+          "IT": "資訊科技",
+          "animal": "動物",
+          "caijing": "財經",
+          "car": "汽車",
+          "chengyu": "成語",
+          "diming": "地名",
+          "food": "美食",
+          "law": "法律",
+          "lishimingren": "歷史名人",
+          "medical": "醫學",
+          "poem": "詩詞"
+        }
+      },
       "hotwordRules": {
         "title": "中文熱詞規則",
         "description": "每行一條：`模式=替換` 按字面替換，`模式=>替換` 按正規表示式替換。在拼音熱詞之後套用。以 # 開頭的行是註解。",

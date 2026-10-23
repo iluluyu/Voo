@@ -886,6 +886,111 @@ pub fn update_custom_words(app: AppHandle, words: Vec<String>) -> Result<(), Str
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// THUOCL 清华开放中文词库导入
+// ---------------------------------------------------------------------------
+
+/// THUOCL 数据文件基址。分类文件名以仓库 data/ 目录实际为准
+/// （实测共 11 个分类；README 中的 medicial/econ/auto/edu/lulu 已不存在）。
+const THUOCL_BASE_URL: &str = "https://raw.githubusercontent.com/thunlp/THUOCL/master/data";
+
+/// 允许导入的 THUOCL 分类，即 data/THUOCL_{分类}.txt 的实际文件名。
+pub const THUOCL_CATEGORIES: &[&str] = &[
+    "IT",
+    "animal",
+    "caijing",
+    "car",
+    "chengyu",
+    "diming",
+    "food",
+    "law",
+    "lishimingren",
+    "medical",
+    "poem",
+];
+
+/// 每个分类导入的最大词条数（按 DF 降序取前 N）。
+const THUOCL_MAX_WORDS: usize = 5000;
+
+/// 词库下载超时（秒）。
+const THUOCL_TIMEOUT_SECS: u64 = 30;
+
+/// 下载并解析一个 THUOCL 分类词库。
+///
+/// 数据格式为每行 `词\t词频DF`。过滤条件：纯汉字、3–50 字；
+/// 同词多行时保留最高 DF，最终按 DF 降序取前 5000 个词返回。
+#[tauri::command]
+#[specta::specta]
+pub async fn import_thuocl_lexicon(category: String) -> Result<Vec<String>, String> {
+    let category = category.trim().to_string();
+    if !THUOCL_CATEGORIES.contains(&category.as_str()) {
+        return Err(format!("Unknown THUOCL category: {category}"));
+    }
+    let url = format!("{THUOCL_BASE_URL}/THUOCL_{category}.txt");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(THUOCL_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download THUOCL {category} lexicon: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download THUOCL {category} lexicon: HTTP {}",
+            response.status()
+        ));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read THUOCL {category} lexicon: {e}"))?;
+
+    Ok(parse_thuocl_lexicon(&body, THUOCL_MAX_WORDS))
+}
+
+/// 解析 THUOCL 词库文本：保留纯汉字且 3–50 字的词，按 DF 降序
+/// （DF 相同时按词序稳定排列）取前 `max_words` 个。
+fn parse_thuocl_lexicon(body: &str, max_words: usize) -> Vec<String> {
+    use crate::audio_toolkit::chinese_hotwords::is_han;
+    use std::collections::HashMap;
+
+    let is_eligible = |word: &str| {
+        let char_count = word.chars().count();
+        (3..=50).contains(&char_count) && word.chars().all(is_han)
+    };
+
+    // 词 → 最高 DF（同词多行时保留最大值）
+    let mut best_df: HashMap<&str, u64> = HashMap::new();
+    for line in body.lines() {
+        let mut columns = line.split('\t');
+        let (Some(word), Some(df)) = (columns.next(), columns.next()) else {
+            continue;
+        };
+        if !is_eligible(word) {
+            continue;
+        }
+        let Ok(df) = df.trim().parse::<u64>() else {
+            continue;
+        };
+        let entry = best_df.entry(word).or_insert(0);
+        if df > *entry {
+            *entry = df;
+        }
+    }
+
+    let mut ranked: Vec<(&str, u64)> = best_df.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    ranked
+        .into_iter()
+        .take(max_words)
+        .map(|(word, _)| word.to_string())
+        .collect()
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn change_word_correction_threshold_setting(
@@ -1545,5 +1650,36 @@ mod tests {
             assert!(key.parse::<Shortcut>().is_ok(), "Tauri rejected {key}");
             assert!(key.parse::<Hotkey>().is_ok(), "HandyKeys rejected {key}");
         }
+    }
+
+    #[test]
+    fn thuocl_parser_filters_ranks_and_caps() {
+        let long_word = "超".repeat(51);
+        let body = format!(
+            "机器学习\t100\n\
+             人工智能\t200\n\
+             机器学习\t50\n\
+             abc\t999\n\
+             汉\t500\n\
+             {long_word}\t400\n\
+             无频列\n\
+             医学影像\tnotanumber\n"
+        );
+        let words = super::parse_thuocl_lexicon(&body, 5000);
+        // 非纯汉字、过短、过长、缺列、DF 非数字的行全部过滤；重复词保留最高 DF
+        assert_eq!(words, vec!["人工智能".to_string(), "机器学习".to_string()]);
+    }
+
+    #[test]
+    fn thuocl_parser_respects_cap() {
+        // 后缀必须保持纯汉字：阿拉伯数字会让词被资格过滤掉。
+        let stems = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+        let body: String = (0..10)
+            .map(|i| format!("词库测试{}\t{}\n", stems[i], 1000 - i))
+            .collect();
+        let words = super::parse_thuocl_lexicon(&body, 3);
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0], "词库测试甲");
+        assert_eq!(words[2], "词库测试丙");
     }
 }

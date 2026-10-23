@@ -345,6 +345,20 @@ async updateCustomWords(words: string[]) : Promise<Result<null, string>> {
 }
 },
 /**
+ * 下载并解析一个 THUOCL 分类词库。
+ * 
+ * 数据格式为每行 `词\t词频DF`。过滤条件：纯汉字、3–50 字；
+ * 同词多行时保留最高 DF，最终按 DF 降序取前 5000 个词返回。
+ */
+async importThuoclLexicon(category: string) : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_thuocl_lexicon", { category }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Temporarily unregister all bindings while the user is recording a
  * shortcut in the UI. This avoids firing actions while keys are recorded.
  */

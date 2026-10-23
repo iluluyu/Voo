@@ -380,6 +380,32 @@
           "traditional": "繁体字"
         }
       },
+      "lexiconImport": {
+        "title": "Import THUOCL Lexicon",
+        "description": "Import category word lists from the Tsinghua THUOCL lexicon. Words are filtered (pure Chinese characters, 3-50 chars) and the top 5000 by word frequency can be appended to your custom words.",
+        "fetch": "Fetch Word Lists",
+        "fetching": "Downloading…",
+        "append": "Append to Custom Words",
+        "cancel": "Cancel",
+        "selectHint": "Select at least one category",
+        "preview": "{{count}} words will be added",
+        "emptyResult": "No new words to add (all filtered out or already present)",
+        "error": "Import failed: {{message}}",
+        "success": "Added {{count}} words",
+        "categories": {
+          "IT": "IT",
+          "animal": "Animals",
+          "caijing": "Finance",
+          "car": "Automotive",
+          "chengyu": "Idioms",
+          "diming": "Place Names",
+          "food": "Food",
+          "law": "Law",
+          "lishimingren": "Historical Figures",
+          "medical": "Medicine",
+          "poem": "Poetry"
+        }
+      },
       "hotwordRules": {
         "title": "Chinese Hotword Rules",
         "description": "One rule per line: `pattern=replacement` as literal, `pattern=>replacement` as regex. Applied after pinyin hotwords. Lines starting with # are comments.",

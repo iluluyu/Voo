@@ -4,6 +4,7 @@ import { ShowOverlay } from "../ShowOverlay";
 import { ModelUnloadTimeoutSetting } from "../ModelUnloadTimeout";
 import { CustomWords } from "../CustomWords";
 import { HotwordRules } from "../HotwordRules";
+import { LexiconImport } from "../LexiconImport";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { StartHidden } from "../StartHidden";
 import { AutostartToggle } from "../AutostartToggle";
@@ -57,6 +58,7 @@ export const AdvancedSettings: React.FC = () => {
         <ChineseScriptSetting descriptionMode="tooltip" grouped={true} />
         <CustomWords descriptionMode="tooltip" grouped />
         <HotwordRules descriptionMode="tooltip" grouped />
+        <LexiconImport descriptionMode="tooltip" grouped />
         <AppendTrailingSpace descriptionMode="tooltip" grouped={true} />
       </SettingsGroup>
 

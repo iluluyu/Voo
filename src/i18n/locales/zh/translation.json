@@ -351,6 +351,32 @@
         "remove": "删除 {{word}}",
         "duplicate": "\"{{word}}\" 已存在"
       },
+      "lexiconImport": {
+        "title": "导入词库（THUOCL）",
+        "description": "从清华 THUOCL 开放词库导入分类词汇。导入时会过滤（纯汉字、3–50 字）并按词频取前 5000 个词，确认后追加到自定义词汇。",
+        "fetch": "获取词库",
+        "fetching": "正在下载…",
+        "append": "追加到自定义词汇",
+        "cancel": "取消",
+        "selectHint": "请先选择至少一个分类",
+        "preview": "将追加 {{count}} 个词",
+        "emptyResult": "没有可追加的新词（已过滤或全部重复）",
+        "error": "导入失败：{{message}}",
+        "success": "已追加 {{count}} 个词",
+        "categories": {
+          "IT": "信息技术",
+          "animal": "动物",
+          "caijing": "财经",
+          "car": "汽车",
+          "chengyu": "成语",
+          "diming": "地名",
+          "food": "美食",
+          "law": "法律",
+          "lishimingren": "历史名人",
+          "medical": "医学",
+          "poem": "诗词"
+        }
+      },
       "hotwordRules": {
         "title": "中文热词规则",
         "description": "每行一条：`模式=替换` 按字面量替换，`模式=>替换` 按正则替换。在拼音热词之后应用。以 # 开头的行是注释。",

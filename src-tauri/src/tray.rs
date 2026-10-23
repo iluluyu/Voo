@@ -33,8 +33,9 @@ use std::time::Instant;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIcon;
-use tauri::{AppHandle, Manager, Theme};
+use tauri::{AppHandle, Emitter, Manager, Theme};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayIconState {
@@ -258,7 +259,9 @@ fn sync_tray_with(app: &AppHandle, update: impl FnOnce(&mut TrayInner)) {
 
     // Tray not built yet (early secure-input monitor callbacks). The intent
     // is kept and picked up by the first sync after the tray exists.
-    if app.try_state::<TrayIcon>().is_none() {
+    if let Some(tray) = app.try_state::<TrayIcon>() {
+        register_add_hotwords_listener(&tray);
+    } else {
         return;
     }
 
@@ -336,6 +339,32 @@ fn compute_desired(app: &AppHandle, icon_state: TrayIconState) -> TrayDesired {
             update_checks_enabled: settings.update_checks_enabled,
         },
     }
+}
+
+/// Menu id of the tray "add hotwords from clipboard" item.
+const ADD_HOTWORDS_MENU_ID: &str = "add_hotwords";
+
+static ADD_HOTWORDS_LISTENER: std::sync::Once = std::sync::Once::new();
+
+/// Registers the tray-side handler for the "add hotwords" menu item.
+///
+/// Menu events are dispatched by the `on_menu_event` closure in `lib.rs`,
+/// which this must not touch; `TrayIcon::on_menu_event` appends to the same
+/// global menu-event listener list, so every menu click reaches both and the
+/// tray-local action stays owned by this module. The handler ignores every
+/// other id (lib.rs keeps handling those).
+fn register_add_hotwords_listener(tray: &TrayIcon) {
+    ADD_HOTWORDS_LISTENER.call_once(|| {
+        tray.on_menu_event(|app, event| {
+            if event.id.as_ref() == ADD_HOTWORDS_MENU_ID {
+                // Menu events arrive on the main thread; the flow shows
+                // blocking dialogs and touches the settings store, so it must
+                // not run there.
+                let app = app.clone();
+                std::thread::spawn(move || add_hotwords_from_clipboard(&app));
+            }
+        });
+    });
 }
 
 fn post_apply(app: &AppHandle) {
@@ -509,6 +538,13 @@ fn build_menu(app: &AppHandle, inputs: &MenuInputs) -> tauri::Result<(Menu<tauri
         true,
         None::<&str>,
     )?;
+    let add_hotwords_i = MenuItem::with_id(
+        app,
+        ADD_HOTWORDS_MENU_ID,
+        crate::tray_i18n::hotwords_strings(Some(&inputs.locale)).menu_label,
+        true,
+        None::<&str>,
+    )?;
     let quit_i = MenuItem::with_id(app, "quit", &strings.quit, true, quit_accelerator)?;
     let separator = || PredefinedMenuItem::separator(app);
 
@@ -560,6 +596,7 @@ fn build_menu(app: &AppHandle, inputs: &MenuInputs) -> tauri::Result<(Menu<tauri
                 &version_i,
                 &separator()?,
                 &copy_last_transcript_i,
+                &add_hotwords_i,
                 &separator()?,
                 &model_submenu,
                 &unload_model_i,
@@ -599,6 +636,113 @@ fn last_transcript_text(entry: &HistoryEntry) -> &str {
         .post_processed_text
         .as_deref()
         .unwrap_or(&entry.transcription_text)
+}
+
+/// Tray "add hotwords" flow: the clipboard is the multiline carrier (one
+/// word per line). The user previews exactly what will be added in a
+/// blocking Ok/Cancel dialog before anything is written.
+///
+/// Must run off the main thread (blocking dialogs) — see
+/// [`register_add_hotwords_listener`].
+///
+/// Note on "add": `shortcut::update_custom_words` *replaces* the list, so the
+/// current `custom_words` are read, merged with the new words and written
+/// back as one Vec. It also does not emit `settings-changed` (unlike its
+/// sibling setters), so that is emitted here to keep the settings UI in sync
+/// (settingsStore listens for it). Engine vocabulary and the Chinese hotword
+/// index both re-read `custom_words` from settings on every transcription
+/// run, so no further refresh is needed.
+pub fn add_hotwords_from_clipboard(app: &AppHandle) {
+    use crate::tray_i18n::{hotwords_added_message, hotwords_strings};
+
+    let locale = settings::get_settings(app).app_language;
+    let strings = hotwords_strings(Some(&locale));
+
+    let clipboard_text = match app.clipboard().read_text() {
+        Ok(text) => text,
+        Err(err) => {
+            error!("Tray add hotwords: failed to read clipboard: {err}");
+            show_info_dialog(app, &strings.preview_title, strings.clipboard_unreadable);
+            return;
+        }
+    };
+
+    // One word per non-empty trimmed line; dedupe against the existing list
+    // (and within the paste itself), preserving order.
+    let mut merged = settings::get_settings(app).custom_words;
+    let existing_len = merged.len();
+    for line in clipboard_text.lines() {
+        let word = line.trim();
+        if !word.is_empty() && !merged.iter().any(|w| w == word) {
+            merged.push(word.to_string());
+        }
+    }
+    let added = merged.len() - existing_len;
+    if added == 0 {
+        info!("Tray add hotwords: no new words in the clipboard.");
+        show_info_dialog(app, &strings.preview_title, strings.none_new);
+        return;
+    }
+
+    let confirmed = app
+        .dialog()
+        .message(hotwords_preview_message(&strings, &merged[existing_len..]))
+        .title(strings.preview_title)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            strings.add.to_string(),
+            strings.cancel.to_string(),
+        ))
+        .kind(MessageDialogKind::Info)
+        .blocking_show();
+    if !confirmed {
+        info!("Tray add hotwords: cancelled by user.");
+        return;
+    }
+
+    if let Err(err) = crate::shortcut::update_custom_words(app.clone(), merged) {
+        error!("Tray add hotwords: failed to save settings: {err}");
+        return;
+    }
+    // `update_custom_words` does not emit this itself; the settings store
+    // re-fetches on it, keeping an open settings window in sync.
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "setting": "custom_words" }),
+    );
+    info!("Tray add hotwords: added {added} word(s) via clipboard.");
+    show_info_dialog(
+        app,
+        &strings.preview_title,
+        &hotwords_added_message(Some(&locale), added),
+    );
+}
+
+fn show_info_dialog(app: &AppHandle, title: &str, message: &str) {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .buttons(MessageDialogButtons::Ok)
+        .kind(MessageDialogKind::Info)
+        .blocking_show();
+}
+
+/// Confirmation-dialog body listing the words about to be added (capped so
+/// the dialog stays usable for large pastes).
+fn hotwords_preview_message(
+    strings: &crate::tray_i18n::HotwordsStrings,
+    words: &[String],
+) -> String {
+    const MAX_SHOWN: usize = 20;
+    let mut message = format!("{}\n", (strings.count_line)(words.len()));
+    for word in words.iter().take(MAX_SHOWN) {
+        message.push_str(word);
+        message.push('\n');
+    }
+    if words.len() > MAX_SHOWN {
+        message.push_str(&(strings.more_line)(words.len() - MAX_SHOWN));
+        message.push('\n');
+    }
+    message
 }
 
 pub fn set_tray_visibility(app: &AppHandle, visible: bool) {
@@ -740,5 +884,18 @@ mod tests {
     #[test]
     fn idle_and_busy_menus_differ() {
         assert_ne!(inputs(false), inputs(true));
+    }
+
+    #[test]
+    fn hotwords_preview_lists_words_and_caps_overflow() {
+        use crate::tray_i18n::hotwords_strings;
+        let strings = hotwords_strings(Some("en"));
+        let words: Vec<String> = (0..25).map(|i| format!("word{i}")).collect();
+        let message = super::hotwords_preview_message(&strings, &words);
+        assert!(message.contains("25 new hotwords to add"));
+        assert!(message.contains("word0"));
+        assert!(message.contains("word19"));
+        assert!(!message.contains("word20\n"));
+        assert!(message.contains("5 more not shown"));
     }
 }
