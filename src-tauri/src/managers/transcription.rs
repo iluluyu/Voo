@@ -2634,30 +2634,14 @@ mod tests {
     }
 
     #[test]
-    fn imported_lexicon_is_candidate_by_default_and_corrects_only_when_activated() {
-        // 四态模型：导入词默认 Candidate（只进建议、不改写）。这条测试同时钉住
-        // 两个方向——默认不乱改；显式提升为 ActiveExact 后才纠正完全同音错字。
+    fn imported_lexicon_is_active_exact_by_default_and_respects_source_mode() {
+        // 导入词默认 **ActiveExact**：整词完全同音会纠正（导完即生效），
+        // 但不会获得近音权限（「什么时候→实模式候」仍被挡住）。
         let mut settings = AppSettings::default();
         settings
             .imported_lexicons
             .insert("THUOCL".to_string(), vec!["中州韵输入法".to_string()]);
 
-        let untouched = post_process_transcription_text(
-            "我在用中州运输入法打字".to_string(),
-            &settings,
-            false,
-            &OutputLanguageEvidence::UserSelected("zh".to_string()),
-            &languages(&["zh"]),
-        );
-        assert_eq!(
-            untouched, "我在用中州运输入法打字",
-            "Candidate 态不得改写文本（这正是「什么时候→实模式候」的防线）"
-        );
-
-        settings.lexicon_term_modes.insert(
-            "中州韵输入法".to_string(),
-            chinese_hotwords::TermMode::ActiveExact,
-        );
         let corrected = post_process_transcription_text(
             "我在用中州运输入法打字".to_string(),
             &settings,
@@ -2667,7 +2651,40 @@ mod tests {
         );
         assert_eq!(
             corrected, "我在用中州韵输入法打字",
-            "显式激活后才纠正同音错字"
+            "默认 ActiveExact 应纠正完全同音错字"
+        );
+
+        // 来源级切到 Candidate：只进建议、不改写。
+        settings
+            .lexicon_source_modes
+            .insert("THUOCL".to_string(), chinese_hotwords::TermMode::Candidate);
+        let untouched = post_process_transcription_text(
+            "我在用中州运输入法打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(
+            untouched, "我在用中州运输入法打字",
+            "Candidate 态不得改写文本"
+        );
+
+        // 单条 override 优先于来源级。
+        settings.lexicon_term_modes.insert(
+            "中州韵输入法".to_string(),
+            chinese_hotwords::TermMode::ActiveExact,
+        );
+        let overridden = post_process_transcription_text(
+            "我在用中州运输入法打字".to_string(),
+            &settings,
+            false,
+            &OutputLanguageEvidence::UserSelected("zh".to_string()),
+            &languages(&["zh"]),
+        );
+        assert_eq!(
+            overridden, "我在用中州韵输入法打字",
+            "单条 override 应覆盖来源级模式"
         );
     }
 

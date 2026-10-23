@@ -480,6 +480,13 @@ pub struct AppSettings {
     /// 里的词保留；字段将来若改名需原子迁移并保留旧 Blocked key。
     #[serde(default)]
     pub lexicon_term_modes: HashMap<String, TermMode>,
+    /// 来源级模式：来源名 → 该源全部词条的档位（单条 override 优先于它）。
+    ///
+    /// 用户手动加的词走 `custom_words`（默认近音）；导入的公开词库默认
+    /// **ActiveExact**——整词完全同音才纠正，既能立刻生效，又不会像近音档
+    /// 那样把「什么时候」改成「实模式候」。
+    #[serde(default)]
+    pub lexicon_source_modes: HashMap<String, TermMode>,
     /// 中文热词规则文本（每行 `模式=替换` 字面量或 `模式=>替换` 正则）
     #[serde(default)]
     pub hotword_rules: String,
@@ -702,8 +709,14 @@ impl AppSettings {
         let mut sources: Vec<&str> = self.imported_lexicons.keys().map(String::as_str).collect();
         sources.sort_unstable();
         for source in sources {
+            // 来源级模式：默认 ActiveExact（导入即生效，但只做完全同音）。
+            let default = self
+                .lexicon_source_modes
+                .get(source)
+                .copied()
+                .unwrap_or(TermMode::ActiveExact);
             for line in &self.imported_lexicons[source] {
-                resolve(line, TermMode::Candidate, &mut modes);
+                resolve(line, default, &mut modes);
             }
         }
         modes
@@ -1390,6 +1403,7 @@ pub fn get_default_settings() -> AppSettings {
         custom_words: Vec::new(),
         imported_lexicons: HashMap::new(),
         lexicon_term_modes: HashMap::new(),
+        lexicon_source_modes: HashMap::new(),
         hotword_rules: String::new(),
         hotword_pinyin_threshold: default_hotword_pinyin_threshold(),
         hotword_dialect_confusion: false,
