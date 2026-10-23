@@ -478,6 +478,15 @@ pub struct LexiconSourceCatalog {
     pub sources: Vec<LexiconSourceInfo>,
 }
 
+/// 扁平源列表（前端 `listLexiconSources` 使用）：与 [`get_lexicon_sources`]
+/// 同源，只是把 `catalog.sources` 直接展开。保留两个命令是为了不回退前端
+/// 已写好的分组渲染（它按每条 `group` 字段自行分组）。
+#[tauri::command]
+#[specta::specta]
+pub fn list_lexicon_sources() -> Vec<LexiconSourceInfo> {
+    get_lexicon_sources().sources
+}
+
 /// 分组目录（只读；已安装状态由前端从 `imported_lexicons` 合并）。
 ///
 /// 返回全部预置源（含分组与许可）；UI 按分组动态渲染，不在前端写死

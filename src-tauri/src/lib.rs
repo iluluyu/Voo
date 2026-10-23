@@ -701,6 +701,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::set_imported_lexicon,
             shortcut::remove_imported_lexicon,
             managers::lexicon_sources::get_lexicon_sources,
+            managers::lexicon_sources::list_lexicon_sources,
             managers::lexicon_sources::preview_open_lexicon_source,
             managers::lexicon_sources::confirm_open_lexicon_source,
             managers::lexicon_sources::proper_nouns_lexicon_version,
