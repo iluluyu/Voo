@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event;
-use transcribe_cpp::{Backend, RunOptions, Task, Transcript};
+use transcribe_cpp::{Backend, Itn, RunOptions, Task, Transcript};
 
 mod chunked;
 mod live;
@@ -1174,6 +1174,10 @@ fn run_setup(info: &LoadedInfo, settings: &AppSettings, validated_language: &str
         language: run_plan.language,
         target_language: run_plan.target_language,
         vocabulary: vocabulary_for_model(info.supports_vocabulary, &settings.custom_words),
+        // 上游 0.9.8 曾显式 use_itn=Some(true)；transcribe-cpp API 迁移到
+        // itn 枚举时丢失，Fun-ASR 默认 DEFAULT→false 会往 prompt 追加
+        // “不进行文本规整”，导致中文无标点。这里恢复开启。
+        itn: Itn::On,
         ..Default::default()
     };
 
