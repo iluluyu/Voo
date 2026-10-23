@@ -13,6 +13,15 @@ import {
   PORTABLE_RELEASES_URL,
 } from "./portableInstaller";
 
+/**
+ * Voo is a fork of cjpais/Handy with no release channel of its own: any update
+ * check would consult upstream Handy's `latest.json` and offer to replace this
+ * fork's installation with the original app's binaries. Update checks
+ * (automatic or manual) are therefore disabled here, and the updater endpoint
+ * in `tauri.conf.json` points at a dead URL as a second line of defence.
+ */
+const FORK_UPDATES_DISABLED = true;
+
 interface UpdateCheckerProps {
   className?: string;
 }
@@ -40,7 +49,9 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
   // stored preference without persisting it, mirroring the backend's effective
   // updater state.
   const updateChecksEnabled =
-    (settings?.update_checks_enabled ?? false) && updateChecksLocked === false;
+    !FORK_UPDATES_DISABLED &&
+    (settings?.update_checks_enabled ?? false) &&
+    updateChecksLocked === false;
 
   const upToDateTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const isManualCheckRef = useRef(false);

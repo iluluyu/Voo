@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Create a report to help us improve Handy
+about: Create a report to help us improve Voo
 title: "[BUG] "
 labels: ["bug"]
 assignees: ""

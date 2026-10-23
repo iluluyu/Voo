@@ -28,7 +28,7 @@
     "customModelDescription": "Non ufficialmente supportato",
     "migration": {
       "title": "I tuoi modelli devono essere aggiornati",
-      "description": "Handy ora usa un nuovo tipo di modello. Scarica la nuova versione per continuare a trascrivere. Le versioni precedenti verranno rimosse.",
+      "description": "Voo ora usa un nuovo tipo di modello. Scarica la nuova versione per continuare a trascrivere. Le versioni precedenti verranno rimosse.",
       "replaces": "Sostituisce {{name}}",
       "oldFormat": "Formato precedente",
       "failed": "Download non riuscito",
@@ -69,7 +69,7 @@
     },
     "permissions": {
       "title": "Permessi Richiesti",
-      "description": "Handy ha bisogno di alcuni permessi per funzionare correttamente.",
+      "description": "Voo ha bisogno di alcuni permessi per funzionare correttamente.",
       "microphone": {
         "title": "Accesso al Microfono",
         "description": "Necessario per sentire la tua voce per la trascrizione."
@@ -130,7 +130,7 @@
       "deleteActiveConfirm": "{{modelName}} è il tuo modello attivo. Eliminarlo interromperà le trascrizioni fino a quando non selezionerai un nuovo modello. Sei sicuro?",
       "deleteTitle": "Elimina modello",
       "retiredNotice": {
-        "title": "I modelli precedenti non funzionano più con Handy",
+        "title": "I modelli precedenti non funzionano più con Voo",
         "description": "Occupano {{size}} sul tuo computer.",
         "delete": "Elimina modelli",
         "deleted": "Modelli precedenti eliminati",
@@ -147,13 +147,13 @@
       "searchPlaceholder": "Cerca modelli per nome…",
       "rescan": {
         "label": "Riscansiona",
-        "tooltip": "Riscansiona per trovare modelli aggiunti alla cartella dei modelli o alla cache di Hugging Face al di fuori di Handy"
+        "tooltip": "Riscansiona per trovare modelli aggiunti alla cartella dei modelli o alla cache di Hugging Face al di fuori di Voo"
       }
     },
     "general": {
       "title": "Generale",
       "shortcut": {
-        "title": "Scorciatoie di Handy",
+        "title": "Scorciatoie di Voo",
         "description": "Configura le scorciatoie per attivare la trascrizione vocale",
         "loading": "Caricamento delle scorciatoie...",
         "none": "Nessuna scorciatoia configurata",
@@ -261,11 +261,11 @@
       },
       "autostart": {
         "label": "Avvia all'Accensione",
-        "description": "Avvia Handy automaticamente quando accedi al computer."
+        "description": "Avvia Voo automaticamente quando accedi al computer."
       },
       "showTrayIcon": {
         "label": "Mostra icona nella barra di sistema",
-        "description": "Mostra l'icona di Handy nella barra di sistema."
+        "description": "Mostra l'icona di Voo nella barra di sistema."
       },
       "overlay": {
         "style": {
@@ -483,7 +483,7 @@
       },
       "updateChecks": {
         "label": "Controlla aggiornamenti",
-        "description": "Controlla automaticamente la disponibilità di nuove versioni di Handy",
+        "description": "Controlla automaticamente la disponibilità di nuove versioni di Voo",
         "lockedDescription": "Disabilitato dalla configurazione di sistema (HANDY_DISABLE_UPDATER)"
       },
       "soundTheme": {
@@ -561,7 +561,7 @@
       },
       "keyboardDiagnostic": {
         "title": "Diagnostica tastiera",
-        "description": "Verifica se gli eventi della tastiera arrivano a Handy. Viene registrato solo il numero di eventi, mai quali tasti premi.",
+        "description": "Verifica se gli eventi della tastiera arrivano a Voo. Viene registrato solo il numero di eventi, mai quali tasti premi.",
         "run": "Esegui diagnostica di 10 s",
         "running": "In ascolto… premi la tua scorciatoia alcune volte (ad es. Option+Space)",
         "secureInputLabel": "Secure Input",
@@ -575,7 +575,7 @@
         "mouse": "Mouse",
         "verdictBlocked": "Secure Input sta bloccando gli eventi dei tasti: le scorciatoie che includono un tasto normale non possono funzionare finché non viene risolto.",
         "verdictSuspicious": "Sono arrivati eventi dei modificatori ma nessun evento dei tasti: qualcosa sta sopprimendo i tasti anche se Secure Input risulta disabilitato. Segnalalo su GitHub.",
-        "verdictOk": "Gli eventi dei tasti arrivano a Handy normalmente.",
+        "verdictOk": "Gli eventi dei tasti arrivano a Voo normalmente.",
         "verdictNoEvents": "Nessun evento rilevato: hai premuto qualche tasto durante il test?",
         "failed": "Diagnostica non riuscita: {{error}}"
       },
@@ -598,11 +598,11 @@
       "title": "Informazioni",
       "version": {
         "title": "Versione",
-        "description": "Versione attuale di Handy"
+        "description": "Versione attuale di Voo"
       },
       "appDataDirectory": {
         "title": "Cartella Dati App",
-        "description": "Cartella in cui Handy salva i dati"
+        "description": "Cartella in cui Voo salva i dati"
       },
       "sourceCode": {
         "title": "Codice Sorgente",
@@ -611,7 +611,7 @@
       },
       "supportDevelopment": {
         "title": "Supporta lo Sviluppo",
-        "description": "Aiutaci a sviluppare Handy",
+        "description": "Aiutaci a sviluppare Voo",
         "button": "Dona"
       },
       "acknowledgments": {
@@ -619,12 +619,12 @@
         "ggml": {
           "title": "ggml",
           "description": "Inferenza ad alte prestazioni del modello di riconoscimento vocale automatico Whisper di OpenAI",
-          "details": "Handy usa ggml per il riconoscimento vocale veloce in locale. Grazie a Georgi Gerganov e collaboratori per il fantastico lavoro."
+          "details": "Voo usa ggml per il riconoscimento vocale veloce in locale. Grazie a Georgi Gerganov e collaboratori per il fantastico lavoro."
         }
       },
       "whatsNewUpdates": {
         "label": "Mostra novità",
-        "description": "Mostra le note di rilascio dopo gli aggiornamenti di Handy"
+        "description": "Mostra le note di rilascio dopo gli aggiornamenti di Voo"
       }
     }
   },
@@ -654,7 +654,7 @@
     "noOptionsFound": "Nessuna opzione trovata"
   },
   "accessibility": {
-    "permissionsDescription": "Handy ha bisogno dei permessi di accessibilità per digitare il testo trascritto.",
+    "permissionsDescription": "Voo ha bisogno dei permessi di accessibilità per digitare il testo trascritto.",
     "openSettings": "Apri Impostazioni di Sistema"
   },
   "errors": {
@@ -677,11 +677,11 @@
   },
   "appLanguage": {
     "title": "Lingua Applicazione",
-    "description": "Cambia la lingua dell'interfaccia di Handy"
+    "description": "Cambia la lingua dell'interfaccia di Voo"
   },
   "theme": {
     "title": "Tema dell'applicazione",
-    "description": "Scegli se Handy segue il tema di sistema o resta chiaro o scuro",
+    "description": "Scegli se Voo segue il tema di sistema o resta chiaro o scuro",
     "options": {
       "system": "Sistema",
       "light": "Chiaro",
@@ -694,7 +694,7 @@
     "loadingModel": "Caricamento del modello..."
   },
   "whatsNew": {
-    "title": "Novità in Handy v{{version}}"
+    "title": "Novità in Voo v{{version}}"
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} potrebbe bloccare 1 scorciatoia",

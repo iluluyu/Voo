@@ -80,7 +80,7 @@ def make_s3():
 
 
 def offered_models(catalog):
-    """Mirror every root-level ASR default Handy can download.
+    """Mirror every root-level ASR default Voo can download.
     Matches catalog::CatalogModel::is_offered (the models directory is flat)."""
     for m in catalog["models"]:
         default = m["files"].get(m["quant"])
